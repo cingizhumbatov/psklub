@@ -1,9 +1,17 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Gamepad2, CupSoda, Cookie, BarChart3, Settings2, Plus, Minus, X, Power,
   ShoppingCart, RotateCcw, AlertTriangle, Package, PackagePlus, CheckCircle2, PlayCircle,
-  Lock, LogOut, ShieldCheck, User, KeyRound, Trash2,
+  Lock, LogOut, ShieldCheck, User, KeyRound, Trash2, AlarmClock, Timer, Gift,
 } from "lucide-react";
+
+// Kabinet başlatma vaxt paketləri
+const PLANS = [
+  { key: "free", label: "Pulsuz", minutes: null, free: true },
+  { key: "30", label: "30 dəqiqə", minutes: 30 },
+  { key: "60", label: "1 saat", minutes: 60 },
+  { key: "120", label: "2 saat", minutes: 120 },
+];
 
 // ---------- THEME ----------
 const T = {
@@ -77,6 +85,7 @@ function segElapsed(cabin, now) {
   return cabin.segments.reduce((s, seg) => s + ((seg.endTime ?? now) - seg.startTime), 0);
 }
 function segCost(cabin, now, cabinRates) {
+  if (cabin.free) return 0; // Pulsuz sessiya — vaxt haqqı yoxdur
   return cabin.segments.reduce((s, seg) => {
     const dur = (seg.endTime ?? now) - seg.startTime;
     const rate = cabinRates?.[seg.cabinId] ?? 1.5;
@@ -164,6 +173,7 @@ export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [now, setNow] = useState(Date.now());
   const [modalCabin, setModalCabin] = useState(null);
+  const [startCabinId, setStartCabinId] = useState(null);
   const [stockModalOpen, setStockModalOpen] = useState(false);
   const [closeDayOpen, setCloseDayOpen] = useState(false);
   const [openDayOpen, setOpenDayOpen] = useState(false);
@@ -233,14 +243,62 @@ export default function App() {
 
   const showToast = useCallback((msg, isError) => {
     setToast({ msg, isError });
-    setTimeout(() => setToast(null), 2500);
+    setTimeout(() => setToast(null), 3500);
   }, []);
+
+  // Vaxt bitmə bildirişi üçün səs (istifadəçi klik etdikdə hazırlanır)
+  const audioRef = useRef(null);
+  function primeAudio() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioRef.current) audioRef.current = new AC();
+      if (audioRef.current.state === "suspended") audioRef.current.resume();
+    } catch {}
+  }
+  function beep() {
+    try {
+      const ctx = audioRef.current;
+      if (!ctx) return;
+      if (ctx.state === "suspended") ctx.resume();
+      const t0 = ctx.currentTime;
+      [0, 0.6].forEach((offset) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.type = "sine";
+        o.frequency.value = 880;
+        g.gain.setValueAtTime(0.0001, t0 + offset);
+        g.gain.exponentialRampToValueAtTime(0.3, t0 + offset + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + offset + 0.45);
+        o.start(t0 + offset);
+        o.stop(t0 + offset + 0.5);
+      });
+    } catch {}
+  }
 
   async function persistActive(next) {
     setActive(next);
     const ok = await safeSet("active-sessions", next);
     if (!ok) showToast("Sessiya yadda saxlanmadı", true);
   }
+
+  // Paket vaxtı bitəndə bir dəfə bildiriş (toast + səs), kartda "Vaxt bitdi" işarəsi qalır
+  useEffect(() => {
+    const due = Object.entries(active).filter(
+      ([, c]) => c.plannedEndTime && !c.notified && now >= c.plannedEndTime
+    );
+    if (due.length === 0) return;
+    const next = { ...active };
+    due.forEach(([cid, c]) => {
+      next[cid] = { ...c, notified: true };
+      showToast(`⏰ ${cabinLabel(settings, Number(cid))} — vaxt bitdi!`, true);
+    });
+    persistActive(next);
+    beep();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now, active, settings]);
 
   async function persistSettings(next) {
     setSettings(next);
@@ -274,13 +332,38 @@ export default function App() {
     showToast(`Anbara ${qty} ədəd ${menuItemLabel(settings.menu, item)} əlavə edildi`, false);
   }
 
-  function startCabin(id) {
+  // "Başlat" düyməsi paket seçimi modalını açır
+  function openStartPicker(id) {
     if (!dayOpen) {
       showToast("Əvvəlcə günü aç", true);
       return;
     }
-    const next = { ...active, [id]: { segments: [{ cabinId: id, startTime: Date.now(), endTime: null }], orders: [] } };
+    primeAudio();
+    setStartCabinId(id);
+  }
+
+  function startCabin(id, plan) {
+    if (!dayOpen) {
+      showToast("Əvvəlcə günü aç", true);
+      return;
+    }
+    const startTime = Date.now();
+    const free = plan?.free === true;
+    const planMinutes = plan?.minutes ?? null;
+    const plannedEndTime = planMinutes ? startTime + planMinutes * 60000 : null;
+    const next = {
+      ...active,
+      [id]: {
+        segments: [{ cabinId: id, startTime, endTime: null }],
+        orders: [],
+        free,
+        planMinutes,
+        plannedEndTime,
+        notified: false,
+      },
+    };
     persistActive(next);
+    setStartCabinId(null);
     setModalCabin(id);
   }
 
@@ -521,6 +604,9 @@ export default function App() {
         .reduce((s, r) => s + r.grandTotal, 0)
     : 0;
   const cabinIds = cabinIdsOf(settings);
+  const timeUpCabins = Object.entries(active)
+    .filter(([, c]) => c.plannedEndTime && now >= c.plannedEndTime)
+    .map(([id]) => Number(id));
 
   return (
     <div
@@ -614,6 +700,18 @@ export default function App() {
             </div>
           </div>
 
+          {timeUpCabins.length > 0 && (
+            <div
+              className="rounded-xl px-4 py-3 mb-4 flex items-center gap-2 dot-pulse"
+              style={{ background: T.panel, border: `1px solid ${T.danger}`, color: T.danger }}
+            >
+              <AlarmClock size={18} />
+              <span style={{ fontSize: 14, fontWeight: 600 }}>
+                Vaxtı bitən kabinet{timeUpCabins.length > 1 ? "lər" : ""}: {timeUpCabins.map((cid) => cabinLabel(settings, cid)).join(", ")}
+              </span>
+            </div>
+          )}
+
           {tab === "warehouse" && isManager ? (
             <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} onDeleteIntake={deleteStockIntake} onReset={resetWarehouse} />
           ) : tab === "reports" && isManager ? (
@@ -629,9 +727,18 @@ export default function App() {
               activeCount={activeCount}
               todayRevenue={todayRevenue}
               dayOpen={dayOpen}
-              onStart={startCabin}
+              onStart={openStartPicker}
               onOpen={setModalCabin}
               onStockSale={() => setStockModalOpen(true)}
+            />
+          )}
+
+          {startCabinId != null && !active[startCabinId] && (
+            <StartCabinModal
+              id={startCabinId}
+              settings={settings}
+              onPick={startCabin}
+              onClose={() => setStartCabinId(null)}
             />
           )}
 
@@ -841,6 +948,10 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
           const elapsed = busy ? segElapsed(cabin, now) : 0;
           const cost = busy ? segCost(cabin, now, settings.cabinRates) : 0;
           const stockTotal = busy ? cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0) : 0;
+          const free = busy && cabin.free;
+          const plannedEnd = busy ? cabin.plannedEndTime : null;
+          const remaining = plannedEnd ? plannedEnd - now : null;
+          const timeUp = plannedEnd != null && remaining <= 0;
           const disabled = !busy && !dayOpen;
           return (
             <div
@@ -848,7 +959,7 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
               className="rounded-2xl p-4 flex flex-col gap-2"
               style={{
                 background: T.panel,
-                border: `1px solid ${busy ? T.occupied : T.border}`,
+                border: `1px solid ${timeUp ? T.danger : busy ? T.occupied : T.border}`,
                 opacity: disabled ? 0.45 : 1,
               }}
             >
@@ -870,17 +981,32 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
                 </div>
                 <span
                   className={busy ? "dot-pulse" : ""}
-                  style={{ width: 9, height: 9, borderRadius: 999, background: busy ? T.occupied : T.free, flexShrink: 0 }}
+                  style={{ width: 9, height: 9, borderRadius: 999, background: timeUp ? T.danger : busy ? T.occupied : T.free, flexShrink: 0 }}
                 />
               </div>
               <div style={{ color: T.muted, fontSize: 12 }}>
-                {busy ? "Məşğuldur" : "Boşdur"} · {money(rate)}/saat
+                {busy ? (free ? "Pulsuz oyun" : "Məşğuldur") : "Boşdur"} · {money(rate)}/saat
               </div>
               {busy ? (
                 <>
                   <div style={{ fontFamily: FONT_MONO, color: T.amber, fontSize: 15, fontWeight: 600 }}>
                     {fmtDuration(elapsed)}
                   </div>
+                  {free ? (
+                    <div style={{ fontFamily: FONT_MONO, color: T.free, fontSize: 12 }} className="flex items-center gap-1">
+                      <Gift size={12} /> Pulsuz
+                    </div>
+                  ) : plannedEnd ? (
+                    timeUp ? (
+                      <div className="dot-pulse flex items-center gap-1" style={{ fontFamily: FONT_MONO, color: T.danger, fontSize: 12, fontWeight: 600 }}>
+                        <AlarmClock size={12} /> Vaxt bitdi
+                      </div>
+                    ) : (
+                      <div style={{ fontFamily: FONT_MONO, color: T.muted, fontSize: 12 }} className="flex items-center gap-1">
+                        <Timer size={12} /> Qalıq: {fmtDuration(remaining)}
+                      </div>
+                    )
+                  ) : null}
                   <div style={{ fontFamily: FONT_MONO, fontSize: 13 }} className="mb-1">{money(cost + stockTotal)}</div>
                 </>
               ) : (
@@ -925,6 +1051,36 @@ function StatCard({ label, value, icon: Icon, color, mono }) {
   );
 }
 
+// ---------- START CABIN (PLAN PICKER) MODAL ----------
+function StartCabinModal({ id, settings, onPick, onClose }) {
+  const nm = cabinName(settings, id);
+  const rate = settings.cabinRates?.[id] ?? 1.5;
+  return (
+    <Modal onClose={onClose} title={`${nm || `Kabinet #${pad(id)}`} — başlat`}>
+      <div style={{ color: T.muted, fontSize: 13 }} className="mb-3">Vaxt paketini seçin</div>
+      <div className="grid grid-cols-2 gap-2.5">
+        {PLANS.map((p) => (
+          <button
+            key={p.key}
+            onClick={() => onPick(id, p)}
+            className="rounded-xl p-4 flex flex-col items-center gap-1"
+            style={{
+              background: T.panel2,
+              border: `1px solid ${p.free ? T.free : T.border}`,
+            }}
+          >
+            {p.free ? <Gift size={20} color={T.free} /> : <Timer size={20} color={T.amber} />}
+            <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }}>{p.label}</span>
+            <span style={{ color: p.free ? T.free : T.muted, fontSize: 12, fontFamily: FONT_MONO }}>
+              {p.free ? "Pulsuz" : money((rate * p.minutes) / 60)}
+            </span>
+          </button>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 // ---------- CABIN MODAL ----------
 function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onCancelSession, onClose }) {
   const [transferTarget, setTransferTarget] = useState("");
@@ -935,14 +1091,16 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
   const stockTotal = cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0);
   const path = cabinPath(cabin);
   const freeCabins = cabinIdsOf(settings).filter((cid) => cid !== id && !activeSessions[cid]);
+  const remaining = cabin.plannedEndTime ? cabin.plannedEndTime - now : null;
+  const timeUp = cabin.plannedEndTime != null && remaining <= 0;
 
   const nm = cabinName(settings, id);
   return (
     <Modal onClose={onClose} title={nm ? `${nm} (#${pad(id)})` : `Kabinet #${pad(id)}`}>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div>
           <div style={{ color: T.muted, fontSize: 12 }}>
-            Başlama: {fmtTime(cabinStartTime(cabin))} · Tarif: {money(rate)}/saat
+            Başlama: {fmtTime(cabinStartTime(cabin))} · Tarif: {cabin.free ? "Pulsuz" : `${money(rate)}/saat`}
           </div>
           {path && <div style={{ color: T.occupied, fontSize: 12 }}>Marşrut: {path}</div>}
           <div style={{ fontFamily: FONT_MONO, color: T.amber, fontSize: 26, fontWeight: 600 }}>{fmtDuration(elapsed)}</div>
@@ -951,6 +1109,40 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
           <div style={{ color: T.muted, fontSize: 12 }}>Cari məbləğ</div>
           <div style={{ fontFamily: FONT_MONO, fontSize: 20, fontWeight: 600 }}>{money(cost + stockTotal)}</div>
         </div>
+      </div>
+
+      <div
+        className="rounded-xl px-3 py-2 mb-4 flex items-center gap-2"
+        style={{
+          background: T.panel2,
+          border: `1px solid ${timeUp ? T.danger : T.border}`,
+          color: cabin.free ? T.free : timeUp ? T.danger : T.text,
+        }}
+      >
+        {cabin.free ? (
+          <>
+            <Gift size={15} /> <span style={{ fontSize: 13, fontWeight: 600 }}>Pulsuz oyun — vaxt haqqı yoxdur</span>
+          </>
+        ) : cabin.plannedEndTime ? (
+          timeUp ? (
+            <>
+              <AlarmClock size={15} className="dot-pulse" />
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Vaxt bitdi ({cabin.planMinutes} dəq paket)</span>
+            </>
+          ) : (
+            <>
+              <Timer size={15} color={T.amber} />
+              <span style={{ fontSize: 13 }}>
+                Paket: {cabin.planMinutes} dəq · Qalıq:{" "}
+                <b style={{ fontFamily: FONT_MONO }}>{fmtDuration(remaining)}</b> (bitir {fmtTime(cabin.plannedEndTime)})
+              </span>
+            </>
+          )
+        ) : (
+          <>
+            <Timer size={15} color={T.muted} /> <span style={{ fontSize: 13, color: T.muted }}>Açıq vaxt (paketsiz)</span>
+          </>
+        )}
       </div>
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Stok əlavə et</div>
