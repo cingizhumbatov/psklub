@@ -39,7 +39,7 @@ const DEFAULT_MENU = {
   ],
 };
 const DEFAULT_PINS = { worker: "1111", manager: "2222" };
-const DEFAULT_SETTINGS = { cabinRates: DEFAULT_CABIN_RATES, menu: DEFAULT_MENU, pins: DEFAULT_PINS };
+const DEFAULT_SETTINGS = { cabinRates: DEFAULT_CABIN_RATES, cabinNames: {}, menu: DEFAULT_MENU, pins: DEFAULT_PINS };
 const DEFAULT_WAREHOUSE = {};
 
 function normalizeSettings(s) {
@@ -62,7 +62,8 @@ function normalizeSettings(s) {
     }
   }
   const pins = { ...DEFAULT_PINS, ...(s.pins || {}) };
-  return { cabinRates, menu, pins };
+  const cabinNames = s.cabinNames || {};
+  return { cabinRates, cabinNames, menu, pins };
 }
 
 function normalizeCabin(cabin, id) {
@@ -90,6 +91,14 @@ function cabinPath(cabin) {
 }
 function cabinIdsOf(settings) {
   return Object.keys(settings.cabinRates).map(Number).sort((a, b) => a - b);
+}
+// Kabinetin adı təyin olunubsa onu, yoxsa "#01" formatını qaytarır
+function cabinName(settings, id) {
+  const n = settings.cabinNames?.[id];
+  return n && String(n).trim() ? String(n).trim() : null;
+}
+function cabinLabel(settings, id) {
+  return cabinName(settings, id) || `#${pad(id)}`;
 }
 
 // ---------- MENU HELPERS ----------
@@ -151,6 +160,7 @@ export default function App() {
   const [todaySales, setTodaySales] = useState([]);
   const [businessDay, setBusinessDay] = useState(todayStr());
   const [dayOpen, setDayOpen] = useState(true);
+  const [dayOpenedAt, setDayOpenedAt] = useState(0);
   const [tab, setTab] = useState("dashboard");
   const [now, setNow] = useState(Date.now());
   const [modalCabin, setModalCabin] = useState(null);
@@ -196,6 +206,7 @@ export default function App() {
       }
       const doStored = await safeGet("day-open");
       const doVal = doStored === null ? true : doStored;
+      const openedAt = await safeGet("day-opened-at");
       const t = await safeGet(`sales:${bd}`);
       if (s) setSettings(normalizeSettings(s));
       if (a) {
@@ -207,6 +218,7 @@ export default function App() {
       }
       setBusinessDay(bd);
       setDayOpen(doVal);
+      if (openedAt != null) setDayOpenedAt(openedAt);
       if (t) setTodaySales(t);
       if (w) setWarehouse(w);
       if (ik) setIntakes(ik);
@@ -284,7 +296,7 @@ export default function App() {
     next[toId] = { ...cabin, segments };
     persistActive(next);
     setModalCabin(toId);
-    showToast(`Kabinet #${pad(fromId)} → #${pad(toId)} transfer edildi`, false);
+    showToast(`${cabinLabel(settings, fromId)} → ${cabinLabel(settings, toId)} transfer edildi`, false);
   }
 
   function changeOrder(id, itemKey, delta) {
@@ -334,7 +346,7 @@ export default function App() {
     delete next[id];
     persistActive(next);
     setModalCabin(null);
-    showToast(`Kabinet ${id} bağlandı — ${money(grandTotal)}`, false);
+    showToast(`${cabinLabel(settings, id)} bağlandı — ${money(grandTotal)}`, false);
   }
 
   async function closeDay(closeTimeMs) {
@@ -379,10 +391,13 @@ export default function App() {
 
   async function openDay(dateLabel, stockAdditions) {
     const bd = dateLabel || todayStr();
+    const openedAt = Date.now();
     await safeSet("current-business-day", bd);
     await safeSet("day-open", true);
+    await safeSet("day-opened-at", openedAt);
     setBusinessDay(bd);
     setDayOpen(true);
+    setDayOpenedAt(openedAt);
     const sales = (await safeGet(`sales:${bd}`)) || [];
     setTodaySales(sales);
 
@@ -447,7 +462,7 @@ export default function App() {
     delete next[id];
     persistActive(next);
     setModalCabin(null);
-    showToast(`Kabinet #${pad(id)} sessiyası ləğv edildi`, false);
+    showToast(`${cabinLabel(settings, id)} sessiyası ləğv edildi`, false);
   }
 
   // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır
@@ -490,7 +505,13 @@ export default function App() {
   }
 
   const activeCount = Object.keys(active).length;
-  const todayRevenue = todaySales.reduce((s, r) => s + r.grandTotal, 0);
+  // "Günün gəliri" yalnız cari açıq günə aiddir. Gün bağlananda 0-lanır,
+  // yeni gün açılanda (eyni tarixdə olsa belə) sıfırdan başlayır.
+  const todayRevenue = dayOpen
+    ? todaySales
+        .filter((r) => (r.endTime ?? r.startTime ?? 0) >= dayOpenedAt)
+        .reduce((s, r) => s + r.grandTotal, 0)
+    : 0;
   const cabinIds = cabinIdsOf(settings);
 
   return (
@@ -807,6 +828,7 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
         {cabinIds.map((id) => {
           const cabin = active[id];
           const busy = !!cabin;
+          const name = cabinName(settings, id);
           const rate = settings.cabinRates?.[id] ?? 1.5;
           const elapsed = busy ? segElapsed(cabin, now) : 0;
           const cost = busy ? segCost(cabin, now, settings.cabinRates) : 0;
@@ -822,11 +844,25 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
                 opacity: disabled ? 0.45 : 1,
               }}
             >
-              <div className="flex items-center justify-between">
-                <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 22 }}>#{pad(id)}</span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-baseline gap-1.5" style={{ minWidth: 0 }}>
+                  <span
+                    style={{
+                      fontFamily: FONT_DISPLAY,
+                      fontWeight: 700,
+                      fontSize: name ? 16 : 22,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {name || `#${pad(id)}`}
+                  </span>
+                  {name && <span style={{ color: T.muted, fontFamily: FONT_MONO, fontSize: 11 }}>#{pad(id)}</span>}
+                </div>
                 <span
                   className={busy ? "dot-pulse" : ""}
-                  style={{ width: 9, height: 9, borderRadius: 999, background: busy ? T.occupied : T.free }}
+                  style={{ width: 9, height: 9, borderRadius: 999, background: busy ? T.occupied : T.free, flexShrink: 0 }}
                 />
               </div>
               <div style={{ color: T.muted, fontSize: 12 }}>
@@ -892,8 +928,9 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
   const path = cabinPath(cabin);
   const freeCabins = cabinIdsOf(settings).filter((cid) => cid !== id && !activeSessions[cid]);
 
+  const nm = cabinName(settings, id);
   return (
-    <Modal onClose={onClose} title={`Kabinet #${pad(id)}`}>
+    <Modal onClose={onClose} title={nm ? `${nm} (#${pad(id)})` : `Kabinet #${pad(id)}`}>
       <div className="flex items-center justify-between mb-4">
         <div>
           <div style={{ color: T.muted, fontSize: 12 }}>
@@ -956,7 +993,7 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
             <option value="">Kabinet seç…</option>
             {freeCabins.map((cid) => (
               <option key={cid} value={cid}>
-                #{pad(cid)} ({money(settings.cabinRates?.[cid] ?? 1.5)}/saat)
+                {cabinLabel(settings, cid)} ({money(settings.cabinRates?.[cid] ?? 1.5)}/saat)
               </option>
             ))}
           </select>
@@ -1429,7 +1466,7 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
         {sessions.map((r, i) => (
           <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
             <span style={{ fontSize: 14, flex: 1 }}>
-              {r.segments && r.segments.length > 1 ? r.segments.map((s) => `#${pad(s.cabinId)}`).join(" → ") : `#${pad(r.cabinetId)}`}
+              {r.segments && r.segments.length > 1 ? r.segments.map((s) => cabinLabel(settings, s.cabinId)).join(" → ") : cabinLabel(settings, r.cabinetId)}
             </span>
             <span style={{ color: T.muted, fontSize: 13 }}>{fmtTime(r.startTime)}–{fmtTime(r.endTime)} · {r.minutes} dəq</span>
             <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 64, textAlign: "right" }}>{money(r.grandTotal)}</span>
@@ -1555,13 +1592,17 @@ function MonthlyReport({ settings }) {
 function SettingsView({ settings, onSave }) {
   const [form, setForm] = useState(settings);
   const [confirmReset, setConfirmReset] = useState(false);
-  const [newCabinId, setNewCabinId] = useState("");
+  const [newCabinName, setNewCabinName] = useState("");
   const [newCabinRate, setNewCabinRate] = useState("1.5");
 
   useEffect(() => setForm(settings), [settings]);
 
   function setCabinRate(id, v) {
     setForm((p) => ({ ...p, cabinRates: { ...p.cabinRates, [id]: v } }));
+  }
+
+  function setCabinName(id, v) {
+    setForm((p) => ({ ...p, cabinNames: { ...(p.cabinNames || {}), [id]: v } }));
   }
 
   function setPin(who, v) {
@@ -1573,22 +1614,35 @@ function SettingsView({ settings, onSave }) {
   const suggestedNextId = cabinIds.length ? Math.max(...cabinIds) + 1 : 1;
 
   function addCabin() {
-    const id = parseInt(newCabinId, 10) || suggestedNextId;
+    const id = suggestedNextId;
     if (form.cabinRates[id] != null) return;
     const rate = parseFloat(newCabinRate) || 1.5;
-    setForm((p) => ({ ...p, cabinRates: { ...p.cabinRates, [id]: rate } }));
-    setNewCabinId("");
+    const nm = newCabinName.trim();
+    setForm((p) => ({
+      ...p,
+      cabinRates: { ...p.cabinRates, [id]: rate },
+      cabinNames: { ...(p.cabinNames || {}), [id]: nm },
+    }));
+    setNewCabinName("");
   }
 
   return (
     <div className="max-w-md">
       <div className="rounded-2xl p-5 mb-4" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
-        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }} className="mb-1">Kabinet tarifləri</div>
-        <div style={{ color: T.muted, fontSize: 12 }} className="mb-3">Hər kabinet üçün saatlıq tarif (₼)</div>
-        <div className="grid grid-cols-2 gap-2 mb-3">
+        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }} className="mb-1">Kabinetlər</div>
+        <div style={{ color: T.muted, fontSize: 12 }} className="mb-3">Hər kabinetin adı (hərflə) və saatlıq tarifi (₼)</div>
+        <div className="flex flex-col gap-2 mb-3">
           {cabinIds.map((id) => (
-            <div key={id} className="flex items-center justify-between rounded-lg px-3 py-2" style={{ background: T.panel2 }}>
-              <span style={{ fontSize: 13, color: T.muted }}>Kabinet #{pad(id)}</span>
+            <div key={id} className="flex items-center gap-2 rounded-lg px-3 py-2" style={{ background: T.panel2 }}>
+              <span style={{ fontSize: 12, color: T.muted, fontFamily: FONT_MONO, minWidth: 26 }}>#{pad(id)}</span>
+              <input
+                type="text"
+                placeholder="Ad (məs: VIP otaq)"
+                value={(form.cabinNames || {})[id] ?? ""}
+                onChange={(e) => setCabinName(id, e.target.value)}
+                className="flex-1 min-w-0 px-2 py-1 rounded text-sm"
+                style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
+              />
               <input
                 type="number"
                 step="0.1"
@@ -1598,19 +1652,19 @@ function SettingsView({ settings, onSave }) {
                 className="w-16 px-2 py-1 rounded text-right text-sm"
                 style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
               />
+              <span style={{ fontSize: 12, color: T.muted }}>₼</span>
             </div>
           ))}
         </div>
-        <div style={{ color: T.muted, fontSize: 12 }} className="mb-1.5">Yeni kabinet əlavə et</div>
+        <div style={{ color: T.muted, fontSize: 12 }} className="mb-1.5">Yeni kabinet əlavə et (#{pad(suggestedNextId)})</div>
         <div className="flex gap-2">
           <input
-            type="number"
-            min="1"
-            placeholder={`#${pad(suggestedNextId)}`}
-            value={newCabinId}
-            onChange={(e) => setNewCabinId(e.target.value)}
-            className="w-20 px-2 py-1.5 rounded-lg text-sm"
-            style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+            type="text"
+            placeholder="Ad (məs: PS5 otaq)"
+            value={newCabinName}
+            onChange={(e) => setNewCabinName(e.target.value)}
+            className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-sm"
+            style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text }}
           />
           <input
             type="number"
@@ -1619,15 +1673,15 @@ function SettingsView({ settings, onSave }) {
             placeholder="tarif"
             value={newCabinRate}
             onChange={(e) => setNewCabinRate(e.target.value)}
-            className="w-20 px-2 py-1.5 rounded-lg text-sm"
+            className="w-16 px-2 py-1.5 rounded-lg text-sm"
             style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
           />
           <button
             onClick={addCabin}
-            className="flex-1 rounded-lg text-sm font-semibold flex items-center justify-center gap-1.5"
+            className="rounded-lg text-sm font-semibold flex items-center justify-center gap-1.5 px-3 shrink-0"
             style={{ background: T.occupied, color: "#0B0D14" }}
           >
-            <Plus size={14} /> Kabinet əlavə et
+            <Plus size={14} /> Əlavə et
           </button>
         </div>
       </div>
