@@ -1,6 +1,8 @@
 // window.storage shim — App.jsx-i dəyişmədən işləməsi üçün.
 // Verilənlər .NET (ASP.NET Core + SQLite) backend-də saxlanılır.
-const API = import.meta.env.VITE_API_URL || "http://localhost:5100";
+// Prod build-də VITE_API_URL="" olur → eyni origin (relativ /api).
+// Lokal dev-də təyin olunmayıb → undefined → localhost:5100 backend-i.
+const API = import.meta.env.VITE_API_URL ?? "http://localhost:5100";
 
 const storage = {
   async get(key) {

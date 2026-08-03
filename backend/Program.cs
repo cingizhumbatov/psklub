@@ -13,8 +13,15 @@ var app = builder.Build();
 
 app.UseCors();
 
+// Frontend (build olunmuş statik fayllar wwwroot-dan) verilir
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 // ---------- SQLite açar-dəyər anbarı ----------
-var dbPath = Path.Combine(AppContext.BaseDirectory, "psklub.db");
+// DB_DIR mühit dəyişəni ilə (məs. Docker volume) təyin oluna bilər
+var dbDir = Environment.GetEnvironmentVariable("DB_DIR") ?? AppContext.BaseDirectory;
+Directory.CreateDirectory(dbDir);
+var dbPath = Path.Combine(dbDir, "psklub.db");
 var connectionString = $"Data Source={dbPath}";
 
 using (var conn = new SqliteConnection(connectionString))
@@ -82,7 +89,8 @@ app.MapGet("/api/storage/list", (string? prefix) =>
     return Results.Json(new { keys });
 });
 
-app.MapGet("/", () => "PS Klub backend işləyir.");
+// SPA fallback — API-yə aid olmayan yollar üçün index.html
+app.MapFallbackToFile("index.html");
 
 app.Run();
 

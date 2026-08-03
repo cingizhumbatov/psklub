@@ -1,0 +1,12 @@
+node_modules
+dist
+.vite
+.git
+.claude
+backend/bin
+backend/obj
+**/*.db
+**/*.db-shm
+**/*.db-wal
+pricebase
+backups

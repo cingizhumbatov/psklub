@@ -1,0 +1,17 @@
+# Deploy — ümumi VPS 62.84.179.39 (attendanceqr, compreface, pricebase,
+# qrlog-staging artıq işləyir; 80/443/8000/8010 tutulub).
+# Domen yoxdur — Caddy-yə toxunmadan xidmət birbaşa 8090 portunu dinləyir.
+services:
+  app:
+    build: .
+    environment:
+      TZ: Asia/Baku
+      DB_DIR: /data
+    volumes:
+      - psklub-data:/data
+    ports:
+      - "8090:8080"
+    restart: unless-stopped
+
+volumes:
+  psklub-data:
