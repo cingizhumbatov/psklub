@@ -21,6 +21,15 @@ const storage = {
     if (!res.ok) throw new Error(`storage.set failed: ${res.status}`);
     return true;
   },
+  async delete(key) {
+    const res = await fetch(`${API}/api/storage/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    if (!res.ok) throw new Error(`storage.delete failed: ${res.status}`);
+    return true;
+  },
   async list(prefix) {
     const res = await fetch(`${API}/api/storage/list?prefix=${encodeURIComponent(prefix || "")}`);
     if (!res.ok) throw new Error(`storage.list failed: ${res.status}`);

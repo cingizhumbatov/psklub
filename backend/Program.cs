@@ -67,6 +67,21 @@ app.MapPost("/api/storage/set", (StoreEntry entry) =>
     return Results.Json(new { ok = true });
 });
 
+// POST /api/storage/delete  { key }  ->  { ok: true }
+app.MapPost("/api/storage/delete", (KeyOnly body) =>
+{
+    if (body is null || body.Key is null)
+        return Results.BadRequest(new { ok = false });
+
+    using var conn = new SqliteConnection(connectionString);
+    conn.Open();
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = "DELETE FROM Store WHERE Key = $key";
+    cmd.Parameters.AddWithValue("$key", body.Key);
+    cmd.ExecuteNonQuery();
+    return Results.Json(new { ok = true });
+});
+
 // GET /api/storage/list?prefix=...  ->  { keys: [...] }
 app.MapGet("/api/storage/list", (string? prefix) =>
 {
@@ -95,3 +110,4 @@ app.MapFallbackToFile("index.html");
 app.Run();
 
 record StoreEntry(string Key, string Value);
+record KeyOnly(string Key);

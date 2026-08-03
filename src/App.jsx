@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   Gamepad2, CupSoda, Cookie, BarChart3, Settings2, Plus, Minus, X, Power,
   ShoppingCart, RotateCcw, AlertTriangle, Package, PackagePlus, CheckCircle2, PlayCircle,
-  Lock, LogOut, ShieldCheck, User, KeyRound,
+  Lock, LogOut, ShieldCheck, User, KeyRound, Trash2,
 } from "lucide-react";
 
 // ---------- THEME ----------
@@ -434,6 +434,61 @@ export default function App() {
     showToast(`Stok satışı əlavə edildi — ${money(stockTotal)}`, false);
   }
 
+  // Səhvən başladılmış sessiyanı ləğv et — satış yazılmır, sifariş edilmiş stok anbara qaytarılır
+  function cancelSession(id) {
+    const cabin = active[id];
+    if (!cabin) return;
+    const nextWarehouse = { ...warehouse };
+    cabin.orders.forEach((o) => {
+      nextWarehouse[o.item] = round2((nextWarehouse[o.item] || 0) + o.qty);
+    });
+    if (cabin.orders.length > 0) persistWarehouse(nextWarehouse);
+    const next = { ...active };
+    delete next[id];
+    persistActive(next);
+    setModalCabin(null);
+    showToast(`Kabinet #${pad(id)} sessiyası ləğv edildi`, false);
+  }
+
+  // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır
+  async function deleteStockIntake(record) {
+    const nextIntakes = intakes.filter((r) => r.id !== record.id);
+    setIntakes(nextIntakes);
+    const ok = await safeSet("stock-intakes", nextIntakes);
+    if (!ok) {
+      showToast("Silinmədi", true);
+      return;
+    }
+    persistWarehouse({
+      ...warehouse,
+      [record.item]: round2(Math.max(0, (warehouse[record.item] || 0) - record.qty)),
+    });
+    showToast(`Daxilolma silindi — ${record.qty} ədəd ${menuItemLabel(settings.menu, record.item)}`, false);
+  }
+
+  // Hesabatdan səhv satış/sessiya qeydini sil — satılan stok anbara qaytarılır
+  async function deleteSale(date, recordId) {
+    const key = `sales:${date}`;
+    const list = (await safeGet(key)) || [];
+    const rec = list.find((r) => r.id === recordId);
+    const next = list.filter((r) => r.id !== recordId);
+    const ok = await safeSet(key, next);
+    if (!ok) {
+      showToast("Silinmədi", true);
+      return list;
+    }
+    if (date === businessDay) setTodaySales(next);
+    if (rec && rec.orders && rec.orders.length > 0) {
+      const nextWarehouse = { ...warehouse };
+      rec.orders.forEach((o) => {
+        nextWarehouse[o.item] = round2((nextWarehouse[o.item] || 0) + o.qty);
+      });
+      persistWarehouse(nextWarehouse);
+    }
+    showToast("Qeyd silindi", false);
+    return next;
+  }
+
   const activeCount = Object.keys(active).length;
   const todayRevenue = todaySales.reduce((s, r) => s + r.grandTotal, 0);
   const cabinIds = cabinIdsOf(settings);
@@ -531,9 +586,9 @@ export default function App() {
           </div>
 
           {tab === "warehouse" && isManager ? (
-            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} />
+            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} onDeleteIntake={deleteStockIntake} />
           ) : tab === "reports" && isManager ? (
-            <Reports businessDay={businessDay} settings={settings} />
+            <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} />
           ) : tab === "settings" && isManager ? (
             <SettingsView settings={settings} onSave={persistSettings} />
           ) : (
@@ -562,6 +617,7 @@ export default function App() {
               onChangeOrder={changeOrder}
               onCheckout={checkoutCabin}
               onTransfer={transferCabin}
+              onCancelSession={cancelSession}
               onClose={() => setModalCabin(null)}
             />
           )}
@@ -826,8 +882,9 @@ function StatCard({ label, value, icon: Icon, color, mono }) {
 }
 
 // ---------- CABIN MODAL ----------
-function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onClose }) {
+function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onCancelSession, onClose }) {
   const [transferTarget, setTransferTarget] = useState("");
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const rate = settings.cabinRates?.[id] ?? 1.5;
   const elapsed = segElapsed(cabin, now);
   const cost = segCost(cabin, now, settings.cabinRates);
@@ -926,6 +983,40 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
       >
         Sessiyanı bağla və hesabla
       </button>
+
+      <div style={{ borderTop: `1px solid ${T.border}` }} className="mt-4 pt-3">
+        {!confirmCancel ? (
+          <button
+            onClick={() => setConfirmCancel(true)}
+            className="w-full py-2.5 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold"
+            style={{ border: `1px solid ${T.danger}`, color: T.danger }}
+          >
+            <Trash2 size={14} /> Sessiyanı ləğv et (səhvən başladılıb)
+          </button>
+        ) : (
+          <>
+            <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">
+              Sessiya silinəcək, satış qeydə alınmayacaq. Kabinetə əlavə edilmiş stok anbara geri qaytarılacaq.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => onCancelSession(id)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
+                style={{ background: T.danger, color: "#1A0A0F" }}
+              >
+                Bəli, ləğv et
+              </button>
+              <button
+                onClick={() => setConfirmCancel(false)}
+                className="flex-1 py-2.5 rounded-xl text-sm"
+                style={{ border: `1px solid ${T.border}`, color: T.muted }}
+              >
+                İmtina
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </Modal>
   );
 }
@@ -1022,8 +1113,9 @@ function Modal({ title, children, onClose }) {
 }
 
 // ---------- WAREHOUSE ----------
-function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd }) {
+function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteIntake }) {
   const [form, setForm] = useState({});
+  const [confirmDelete, setConfirmDelete] = useState(null);
   const todayAdditions = {};
   intakes.forEach((r) => {
     if (r.businessDay === businessDay) {
@@ -1091,12 +1183,33 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd }) {
           <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Hələ anbara mal daxil edilməyib</div>
         ) : (
           intakes.slice(0, 15).map((r, i) => (
-            <div key={r.id} className="flex items-center justify-between px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
-              <span style={{ fontSize: 14 }}>{menuItemLabel(menu, r.item)}</span>
+            <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
+              <span style={{ fontSize: 14, flex: 1 }}>{menuItemLabel(menu, r.item)}</span>
               <span style={{ color: T.muted, fontSize: 13 }}>
                 {new Date(r.timestamp).toLocaleDateString("az-AZ")} {fmtTime(r.timestamp)}
               </span>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 14, color: T.free }}>+{r.qty}</span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 14, color: T.free, minWidth: 34, textAlign: "right" }}>+{r.qty}</span>
+              {confirmDelete === r.id ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => {
+                      onDeleteIntake(r);
+                      setConfirmDelete(null);
+                    }}
+                    className="px-2 py-1 rounded text-xs font-semibold"
+                    style={{ background: T.danger, color: "#1A0A0F" }}
+                  >
+                    Sil
+                  </button>
+                  <button onClick={() => setConfirmDelete(null)} className="px-2 py-1 rounded text-xs" style={{ color: T.muted }}>
+                    İmtina
+                  </button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmDelete(r.id)} title="Daxilolmanı sil" className="p-1 rounded" style={{ color: T.muted }}>
+                  <Trash2 size={15} />
+                </button>
+              )}
             </div>
           ))
         )}
@@ -1208,7 +1321,7 @@ function OpenDayModal({ menu, warehouse, canAddStock = true, onClose, onConfirm 
 }
 
 // ---------- REPORTS ----------
-function Reports({ businessDay, settings }) {
+function Reports({ businessDay, settings, onDeleteSale }) {
   const [mode, setMode] = useState("daily");
   return (
     <div>
@@ -1224,18 +1337,25 @@ function Reports({ businessDay, settings }) {
           </button>
         ))}
       </div>
-      {mode === "daily" ? <DailyReport defaultDate={businessDay} settings={settings} /> : <MonthlyReport settings={settings} />}
+      {mode === "daily" ? <DailyReport defaultDate={businessDay} settings={settings} onDeleteSale={onDeleteSale} /> : <MonthlyReport settings={settings} />}
     </div>
   );
 }
 
-function DailyReport({ defaultDate, settings }) {
+function DailyReport({ defaultDate, settings, onDeleteSale }) {
   const [date, setDate] = useState(defaultDate || todayStr());
   const [sales, setSales] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
 
   useEffect(() => {
     (async () => setSales((await safeGet(`sales:${date}`)) || []))();
   }, [date]);
+
+  async function handleDelete(recordId) {
+    const next = await onDeleteSale(date, recordId);
+    setSales(next);
+    setConfirmDel(null);
+  }
 
   if (sales === null) return <div style={{ color: T.muted }}>Yüklənir…</div>;
 
@@ -1249,6 +1369,27 @@ function DailyReport({ defaultDate, settings }) {
     itemTotals[o.item].revenue += o.qty * o.unitPrice;
   }));
   const sessions = sales.filter((r) => r.type === "cabinet");
+  const stockSales = sales.filter((r) => r.type === "stock");
+
+  const delControl = (recordId) =>
+    confirmDel === recordId ? (
+      <span className="flex items-center gap-1">
+        <button
+          onClick={() => handleDelete(recordId)}
+          className="px-2 py-1 rounded text-xs font-semibold"
+          style={{ background: T.danger, color: "#1A0A0F" }}
+        >
+          Sil
+        </button>
+        <button onClick={() => setConfirmDel(null)} className="px-2 py-1 rounded text-xs" style={{ color: T.muted }}>
+          İmtina
+        </button>
+      </span>
+    ) : (
+      <button onClick={() => setConfirmDel(recordId)} title="Qeydi sil" className="p-1 rounded" style={{ color: T.muted }}>
+        <Trash2 size={15} />
+      </button>
+    );
 
   return (
     <div>
@@ -1281,19 +1422,38 @@ function DailyReport({ defaultDate, settings }) {
       </div>
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Kabinet sessiyaları ({sessions.length})</div>
-      <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+      <div className="rounded-2xl overflow-hidden mb-5" style={{ border: `1px solid ${T.border}` }}>
         {sessions.length === 0 && (
           <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Bu gün üçün sessiya yoxdur</div>
         )}
         {sessions.map((r, i) => (
-          <div key={r.id} className="flex items-center justify-between px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
-            <span style={{ fontSize: 14 }}>
+          <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
+            <span style={{ fontSize: 14, flex: 1 }}>
               {r.segments && r.segments.length > 1 ? r.segments.map((s) => `#${pad(s.cabinId)}`).join(" → ") : `#${pad(r.cabinetId)}`}
             </span>
             <span style={{ color: T.muted, fontSize: 13 }}>{fmtTime(r.startTime)}–{fmtTime(r.endTime)} · {r.minutes} dəq</span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 14 }}>{money(r.grandTotal)}</span>
+            <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 64, textAlign: "right" }}>{money(r.grandTotal)}</span>
+            {delControl(r.id)}
           </div>
         ))}
+      </div>
+
+      <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Stok satışları ({stockSales.length})</div>
+      <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+        {stockSales.length === 0 ? (
+          <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Bu gün kabinetsiz stok satışı yoxdur</div>
+        ) : (
+          stockSales.map((r, i) => (
+            <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
+              <span style={{ fontSize: 14, flex: 1 }}>
+                {r.orders?.map((o) => `${menuItemLabel(settings.menu, o.item)}×${o.qty}`).join(", ") || "Stok satışı"}
+              </span>
+              <span style={{ color: T.muted, fontSize: 13 }}>{r.endTime ? fmtTime(r.endTime) : ""}</span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 64, textAlign: "right" }}>{money(r.grandTotal)}</span>
+              {delControl(r.id)}
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
