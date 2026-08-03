@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   Gamepad2, CupSoda, Cookie, BarChart3, Settings2, Plus, Minus, X, Power,
   ShoppingCart, RotateCcw, AlertTriangle, Package, PackagePlus, CheckCircle2, PlayCircle,
+  Lock, LogOut, ShieldCheck, User, KeyRound,
 } from "lucide-react";
 
 // ---------- THEME ----------
@@ -37,7 +38,8 @@ const DEFAULT_MENU = {
     { id: "pirojki", name: "Piroşki", categoryId: "food", price: 1.5 },
   ],
 };
-const DEFAULT_SETTINGS = { cabinRates: DEFAULT_CABIN_RATES, menu: DEFAULT_MENU };
+const DEFAULT_PINS = { worker: "1111", manager: "2222" };
+const DEFAULT_SETTINGS = { cabinRates: DEFAULT_CABIN_RATES, menu: DEFAULT_MENU, pins: DEFAULT_PINS };
 const DEFAULT_WAREHOUSE = {};
 
 function normalizeSettings(s) {
@@ -59,7 +61,8 @@ function normalizeSettings(s) {
       });
     }
   }
-  return { cabinRates, menu };
+  const pins = { ...DEFAULT_PINS, ...(s.pins || {}) };
+  return { cabinRates, menu, pins };
 }
 
 function normalizeCabin(cabin, id) {
@@ -157,6 +160,28 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [warehouse, setWarehouse] = useState(DEFAULT_WAREHOUSE);
   const [intakes, setIntakes] = useState([]);
+  const [role, setRole] = useState(() => {
+    try {
+      return localStorage.getItem("psklub-role") || null;
+    } catch {
+      return null;
+    }
+  });
+  const isManager = role === "manager";
+
+  function login(r) {
+    setRole(r);
+    try {
+      localStorage.setItem("psklub-role", r);
+    } catch {}
+    setTab("dashboard");
+  }
+  function logout() {
+    setRole(null);
+    try {
+      localStorage.removeItem("psklub-role");
+    } catch {}
+  }
 
   useEffect(() => {
     (async () => {
@@ -425,111 +450,134 @@ export default function App() {
         input[type=date], input[type=month], input[type=time], input[type=number] { color-scheme: dark; }
       `}</style>
 
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <div style={{ background: T.panel2, borderRadius: 12 }} className="p-2.5">
-            <Gamepad2 size={24} color={T.free} />
-          </div>
-          <div>
-            <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 20 }}>PS Klub — İdarəetmə</div>
-            <div style={{ color: T.muted, fontSize: 13 }}>{cabinIds.length} kabinet · idarəetmə paneli</div>
-          </div>
-        </div>
-        <nav className="flex gap-1" style={{ background: T.panel, borderRadius: 10, padding: 4 }}>
-          {[
-            { k: "dashboard", label: "Kabinetlər", icon: Gamepad2 },
-            { k: "warehouse", label: "Anbar", icon: Package },
-            { k: "reports", label: "Hesabatlar", icon: BarChart3 },
-            { k: "settings", label: "Ayarlar", icon: Settings2 },
-          ].map((t) => (
-            <button
-              key={t.k}
-              onClick={() => setTab(t.k)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm"
-              style={{
-                background: tab === t.k ? T.panel2 : "transparent",
-                color: tab === t.k ? T.text : T.muted,
-                fontWeight: tab === t.k ? 600 : 400,
-              }}
-            >
-              <t.icon size={15} /> {t.label}
-            </button>
-          ))}
-        </nav>
-        <div className="flex items-center gap-2">
-          <span style={{ color: T.muted, fontSize: 12 }} className="flex items-center gap-1.5">
-            <span style={{ width: 7, height: 7, borderRadius: 999, background: dayOpen ? T.free : T.danger }} />
-            {dayOpen ? `Açıq gün: ${businessDay}` : `Bağlı gün: ${businessDay}`}
-          </span>
-          {dayOpen ? (
-            <button
-              onClick={() => setCloseDayOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold"
-              style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
-            >
-              <CheckCircle2 size={15} color={T.amber} /> Günü bağla
-            </button>
-          ) : (
-            <button
-              onClick={() => setOpenDayOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold"
-              style={{ background: T.free, color: "#0B0D14" }}
-            >
-              <PlayCircle size={15} /> Günü aç
-            </button>
-          )}
-        </div>
-      </div>
-
       {loading ? (
         <div style={{ color: T.muted }} className="text-center py-20">Yüklənir…</div>
-      ) : tab === "dashboard" ? (
-        <Dashboard
-          active={active}
-          now={now}
-          settings={settings}
-          warehouse={warehouse}
-          activeCount={activeCount}
-          todayRevenue={todayRevenue}
-          dayOpen={dayOpen}
-          onStart={startCabin}
-          onOpen={setModalCabin}
-          onStockSale={() => setStockModalOpen(true)}
-        />
-      ) : tab === "warehouse" ? (
-        <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} />
-      ) : tab === "reports" ? (
-        <Reports businessDay={businessDay} settings={settings} />
+      ) : !role ? (
+        <LoginView settings={settings} onLogin={login} />
       ) : (
-        <SettingsView settings={settings} onSave={persistSettings} />
-      )}
+        <>
+          {/* Header */}
+          <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div style={{ background: T.panel2, borderRadius: 12 }} className="p-2.5">
+                <Gamepad2 size={24} color={T.free} />
+              </div>
+              <div>
+                <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 20 }}>PS Klub — İdarəetmə</div>
+                <div style={{ color: T.muted, fontSize: 13 }}>{cabinIds.length} kabinet · idarəetmə paneli</div>
+              </div>
+            </div>
+            <nav className="flex gap-1" style={{ background: T.panel, borderRadius: 10, padding: 4 }}>
+              {[
+                { k: "dashboard", label: "Kabinetlər", icon: Gamepad2 },
+                { k: "warehouse", label: "Anbar", icon: Package, manager: true },
+                { k: "reports", label: "Hesabatlar", icon: BarChart3, manager: true },
+                { k: "settings", label: "Ayarlar", icon: Settings2, manager: true },
+              ]
+                .filter((t) => isManager || !t.manager)
+                .map((t) => (
+                  <button
+                    key={t.k}
+                    onClick={() => setTab(t.k)}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm"
+                    style={{
+                      background: tab === t.k ? T.panel2 : "transparent",
+                      color: tab === t.k ? T.text : T.muted,
+                      fontWeight: tab === t.k ? 600 : 400,
+                    }}
+                  >
+                    <t.icon size={15} /> {t.label}
+                  </button>
+                ))}
+            </nav>
+            <div className="flex items-center gap-2">
+              <span style={{ color: T.muted, fontSize: 12 }} className="flex items-center gap-1.5">
+                <span style={{ width: 7, height: 7, borderRadius: 999, background: dayOpen ? T.free : T.danger }} />
+                {dayOpen ? `Açıq gün: ${businessDay}` : `Bağlı gün: ${businessDay}`}
+              </span>
+              {dayOpen ? (
+                <button
+                  onClick={() => setCloseDayOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold"
+                  style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
+                >
+                  <CheckCircle2 size={15} color={T.amber} /> Günü bağla
+                </button>
+              ) : (
+                <button
+                  onClick={() => setOpenDayOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold"
+                  style={{ background: T.free, color: "#0B0D14" }}
+                >
+                  <PlayCircle size={15} /> Günü aç
+                </button>
+              )}
+              <span
+                className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-semibold"
+                style={{ background: T.panel2, color: isManager ? T.occupied : T.free }}
+              >
+                {isManager ? <ShieldCheck size={15} /> : <User size={15} />}
+                {isManager ? "Müdir" : "İşçi"}
+              </span>
+              <button
+                onClick={logout}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold"
+                style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.muted }}
+                title="Çıxış"
+              >
+                <LogOut size={15} /> Çıxış
+              </button>
+            </div>
+          </div>
 
-      {modalCabin && active[modalCabin] && (
-        <CabinModal
-          id={modalCabin}
-          cabin={active[modalCabin]}
-          now={now}
-          settings={settings}
-          warehouse={warehouse}
-          activeSessions={active}
-          onChangeOrder={changeOrder}
-          onCheckout={checkoutCabin}
-          onTransfer={transferCabin}
-          onClose={() => setModalCabin(null)}
-        />
-      )}
+          {tab === "warehouse" && isManager ? (
+            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} />
+          ) : tab === "reports" && isManager ? (
+            <Reports businessDay={businessDay} settings={settings} />
+          ) : tab === "settings" && isManager ? (
+            <SettingsView settings={settings} onSave={persistSettings} />
+          ) : (
+            <Dashboard
+              active={active}
+              now={now}
+              settings={settings}
+              warehouse={warehouse}
+              activeCount={activeCount}
+              todayRevenue={todayRevenue}
+              dayOpen={dayOpen}
+              onStart={startCabin}
+              onOpen={setModalCabin}
+              onStockSale={() => setStockModalOpen(true)}
+            />
+          )}
 
-      {stockModalOpen && (
-        <StockSaleModal settings={settings} warehouse={warehouse} onSubmit={submitStockSale} onClose={() => setStockModalOpen(false)} />
-      )}
+          {modalCabin && active[modalCabin] && (
+            <CabinModal
+              id={modalCabin}
+              cabin={active[modalCabin]}
+              now={now}
+              settings={settings}
+              warehouse={warehouse}
+              activeSessions={active}
+              onChangeOrder={changeOrder}
+              onCheckout={checkoutCabin}
+              onTransfer={transferCabin}
+              onClose={() => setModalCabin(null)}
+            />
+          )}
 
-      {closeDayOpen && (
-        <CloseDayModal activeCount={Object.keys(active).length} onClose={() => setCloseDayOpen(false)} onConfirm={closeDay} />
-      )}
+          {stockModalOpen && (
+            <StockSaleModal settings={settings} warehouse={warehouse} onSubmit={submitStockSale} onClose={() => setStockModalOpen(false)} />
+          )}
 
-      {openDayOpen && (
-        <OpenDayModal menu={settings.menu} warehouse={warehouse} onClose={() => setOpenDayOpen(false)} onConfirm={openDay} />
+          {closeDayOpen && (
+            <CloseDayModal activeCount={Object.keys(active).length} onClose={() => setCloseDayOpen(false)} onConfirm={closeDay} />
+          )}
+
+          {openDayOpen && (
+            <OpenDayModal menu={settings.menu} warehouse={warehouse} canAddStock={isManager} onClose={() => setOpenDayOpen(false)} onConfirm={openDay} />
+          )}
+        </>
       )}
 
       {toast && (
@@ -540,6 +588,111 @@ export default function App() {
           {toast.msg}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- LOGIN ----------
+function LoginView({ settings, onLogin }) {
+  const [selected, setSelected] = useState(null); // "worker" | "manager"
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState(false);
+  const pins = settings.pins || {};
+
+  const profiles = [
+    { role: "worker", label: "İşçi", desc: "Kabinetlər və satış", icon: User, color: T.free },
+    { role: "manager", label: "Müdir", desc: "Tam idarəetmə", icon: ShieldCheck, color: T.occupied },
+  ];
+
+  function pick(role) {
+    setSelected(role);
+    setPin("");
+    setError(false);
+  }
+  function submit() {
+    if (pin === String(pins[selected] ?? "")) onLogin(selected);
+    else setError(true);
+  }
+
+  const current = profiles.find((p) => p.role === selected);
+
+  return (
+    <div className="flex items-center justify-center" style={{ minHeight: "80vh" }}>
+      <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
+        <div className="flex items-center gap-3 mb-1">
+          <div style={{ background: T.panel2, borderRadius: 12 }} className="p-2.5">
+            <Gamepad2 size={24} color={T.free} />
+          </div>
+          <div>
+            <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 20 }}>PS Klub</div>
+            <div style={{ color: T.muted, fontSize: 13 }}>İdarəetmə paneli</div>
+          </div>
+        </div>
+
+        {!selected ? (
+          <>
+            <div style={{ color: T.muted, fontSize: 13 }} className="mt-4 mb-3">Profil seçin</div>
+            <div className="flex flex-col gap-2.5">
+              {profiles.map((p) => (
+                <button
+                  key={p.role}
+                  onClick={() => pick(p.role)}
+                  className="flex items-center gap-3 rounded-xl p-3.5 text-left"
+                  style={{ background: T.panel2, border: `1px solid ${T.border}` }}
+                >
+                  <div style={{ background: T.panel, borderRadius: 10 }} className="p-2.5">
+                    <p.icon size={20} color={p.color} />
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 15 }}>{p.label}</div>
+                    <div style={{ color: T.muted, fontSize: 12 }}>{p.desc}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="mt-4 mb-3 flex items-center gap-2">
+              <current.icon size={16} color={current.color} />
+              <span style={{ fontWeight: 600, fontSize: 15 }}>{current.label}</span>
+              <span style={{ color: T.muted, fontSize: 12 }}>— PIN kodu daxil edin</span>
+            </div>
+            <div className="flex items-center gap-2 mb-1 rounded-xl px-3 py-2.5" style={{ background: T.panel2, border: `1px solid ${error ? T.danger : T.border}` }}>
+              <Lock size={16} color={T.muted} />
+              <input
+                type="password"
+                inputMode="numeric"
+                autoFocus
+                value={pin}
+                onChange={(e) => {
+                  setPin(e.target.value);
+                  setError(false);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && submit()}
+                placeholder="••••"
+                className="flex-1 bg-transparent outline-none text-sm"
+                style={{ color: T.text, fontFamily: FONT_MONO, letterSpacing: 2 }}
+              />
+            </div>
+            {error && <div style={{ color: T.danger, fontSize: 12 }} className="mb-1">PIN kodu yanlışdır</div>}
+            <button
+              onClick={submit}
+              className="w-full py-3 rounded-xl font-semibold mt-3"
+              style={{ background: T.free, color: "#0B0D14" }}
+            >
+              Daxil ol
+            </button>
+            <button
+              onClick={() => setSelected(null)}
+              className="w-full py-2 rounded-xl text-sm mt-2"
+              style={{ color: T.muted }}
+            >
+              ← Profil dəyiş
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -987,14 +1140,16 @@ function CloseDayModal({ activeCount, onClose, onConfirm }) {
   );
 }
 
-function OpenDayModal({ menu, warehouse, onClose, onConfirm }) {
+function OpenDayModal({ menu, warehouse, canAddStock = true, onClose, onConfirm }) {
   const [date, setDate] = useState(todayStr());
   const [additions, setAdditions] = useState({});
 
   return (
     <Modal onClose={onClose} title="Günü aç">
       <div style={{ color: T.muted, fontSize: 13 }} className="mb-3">
-        Yeni iş günü açılacaq. Dünənki qalıq avtomatik saxlanılır — istəsən bugünkü üçün əlavə mal da daxil edə bilərsən.
+        {canAddStock
+          ? "Yeni iş günü açılacaq. Dünənki qalıq avtomatik saxlanılır — istəsən bugünkü üçün əlavə mal da daxil edə bilərsən."
+          : "Yeni iş günü açılacaq. Dünənki qalıq avtomatik saxlanılır."}
       </div>
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-1">Gün tarixi</div>
       <input
@@ -1005,37 +1160,41 @@ function OpenDayModal({ menu, warehouse, onClose, onConfirm }) {
         style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
       />
 
-      <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Bugünkü stok (istəyə görə)</div>
-      <div className="flex flex-col gap-3 mb-4">
-        {itemsByCategory(menu).map(({ cat, items }) =>
-          items.length === 0 ? null : (
-            <div key={cat.id}>
-              <div style={{ color: T.muted, fontSize: 11, fontWeight: 600, letterSpacing: 0.4 }} className="mb-1.5 uppercase">
-                {cat.name}
-              </div>
-              <div className="flex flex-col gap-1.5">
-                {items.map((it) => (
-                  <div key={it.id} className="flex items-center justify-between rounded-lg px-2.5 py-1.5" style={{ background: T.panel2 }}>
-                    <div>
-                      <span style={{ fontSize: 13 }}>{it.name}</span>
-                      <span style={{ color: T.muted, fontSize: 11 }}> · qalıq: {warehouse[it.id] || 0}</span>
-                    </div>
-                    <input
-                      type="number"
-                      min="0"
-                      placeholder="0"
-                      value={additions[it.id] || ""}
-                      onChange={(e) => setAdditions((p) => ({ ...p, [it.id]: parseInt(e.target.value, 10) || 0 }))}
-                      className="w-16 px-2 py-1 rounded text-right text-sm"
-                      style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
-                    />
+      {canAddStock && (
+        <>
+          <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Bugünkü stok (istəyə görə)</div>
+          <div className="flex flex-col gap-3 mb-4">
+            {itemsByCategory(menu).map(({ cat, items }) =>
+              items.length === 0 ? null : (
+                <div key={cat.id}>
+                  <div style={{ color: T.muted, fontSize: 11, fontWeight: 600, letterSpacing: 0.4 }} className="mb-1.5 uppercase">
+                    {cat.name}
                   </div>
-                ))}
-              </div>
-            </div>
-          )
-        )}
-      </div>
+                  <div className="flex flex-col gap-1.5">
+                    {items.map((it) => (
+                      <div key={it.id} className="flex items-center justify-between rounded-lg px-2.5 py-1.5" style={{ background: T.panel2 }}>
+                        <div>
+                          <span style={{ fontSize: 13 }}>{it.name}</span>
+                          <span style={{ color: T.muted, fontSize: 11 }}> · qalıq: {warehouse[it.id] || 0}</span>
+                        </div>
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="0"
+                          value={additions[it.id] || ""}
+                          onChange={(e) => setAdditions((p) => ({ ...p, [it.id]: parseInt(e.target.value, 10) || 0 }))}
+                          className="w-16 px-2 py-1 rounded text-right text-sm"
+                          style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        </>
+      )}
 
       <button
         onClick={() => onConfirm(date, additions)}
@@ -1245,6 +1404,11 @@ function SettingsView({ settings, onSave }) {
     setForm((p) => ({ ...p, cabinRates: { ...p.cabinRates, [id]: v } }));
   }
 
+  function setPin(who, v) {
+    const digits = v.replace(/\D/g, "").slice(0, 6);
+    setForm((p) => ({ ...p, pins: { ...(p.pins || {}), [who]: digits } }));
+  }
+
   const cabinIds = Object.keys(form.cabinRates).map(Number).sort((a, b) => a - b);
   const suggestedNextId = cabinIds.length ? Math.max(...cabinIds) + 1 : 1;
 
@@ -1312,6 +1476,34 @@ function SettingsView({ settings, onSave }) {
         <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }} className="mb-1">Menyu ayarları</div>
         <div style={{ color: T.muted, fontSize: 12 }} className="mb-3">Bölmələr və məhsullar</div>
         <MenuSettingsPanel menu={form.menu} onChange={(menu) => setForm((p) => ({ ...p, menu }))} />
+      </div>
+
+      <div className="rounded-2xl p-5 mb-4" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
+        <div className="flex items-center gap-2 mb-1">
+          <KeyRound size={16} color={T.amber} />
+          <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }}>Giriş PIN kodları</div>
+        </div>
+        <div style={{ color: T.muted, fontSize: 12 }} className="mb-3">Profillərə giriş üçün PIN kodları</div>
+        <div className="flex flex-col gap-2">
+          {[
+            { who: "worker", label: "İşçi", icon: User, color: T.free },
+            { who: "manager", label: "Müdir", icon: ShieldCheck, color: T.occupied },
+          ].map((p) => (
+            <div key={p.who} className="flex items-center justify-between rounded-lg px-3 py-2" style={{ background: T.panel2 }}>
+              <span className="flex items-center gap-2" style={{ fontSize: 13, color: T.muted }}>
+                <p.icon size={15} color={p.color} /> {p.label} PIN
+              </span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={(form.pins || {})[p.who] ?? ""}
+                onChange={(e) => setPin(p.who, e.target.value)}
+                className="w-24 px-2 py-1 rounded text-right text-sm"
+                style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO, letterSpacing: 2 }}
+              />
+            </div>
+          ))}
+        </div>
       </div>
 
       <button onClick={() => onSave(form)} className="w-full py-3 rounded-xl font-semibold mb-4" style={{ background: T.free, color: "#0B0D14" }}>
