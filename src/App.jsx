@@ -640,17 +640,24 @@ export default function App() {
       ) : (
         <>
           {/* Header */}
-          <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-            <div className="flex items-center gap-3">
-              <div style={{ background: T.panel2, borderRadius: 12 }} className="p-2.5">
+          <div className="mb-6 flex flex-col lg:flex-row lg:items-center gap-3">
+            <div className="flex items-center gap-3 lg:mr-auto min-w-0">
+              <div style={{ background: T.panel2, borderRadius: 12 }} className="p-2.5 shrink-0">
                 <Gamepad2 size={24} color={T.free} />
               </div>
-              <div>
-                <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 20 }}>PS Klub — İdarəetmə</div>
-                <div style={{ color: T.muted, fontSize: 13 }}>{cabinIds.length} kabinet · idarəetmə paneli</div>
+              <div className="min-w-0">
+                <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 20 }} className="truncate">PS Klub — İdarəetmə</div>
+                <div style={{ color: T.muted, fontSize: 13 }} className="truncate">{cabinIds.length} kabinet · idarəetmə paneli</div>
               </div>
+              <span
+                className="flex lg:hidden items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold shrink-0 ml-auto"
+                style={{ background: T.panel2, color: isManager ? T.occupied : T.free }}
+              >
+                {isManager ? <ShieldCheck size={14} /> : <User size={14} />}
+                {isManager ? "Müdir" : "İşçi"}
+              </span>
             </div>
-            <nav className="flex gap-1" style={{ background: T.panel, borderRadius: 10, padding: 4 }}>
+            <nav className="flex gap-1 w-full lg:w-auto" style={{ background: T.panel, borderRadius: 10, padding: 4 }}>
               {[
                 { k: "dashboard", label: "Kabinetlər", icon: Gamepad2 },
                 { k: "warehouse", label: "Anbar", icon: Package, manager: true },
@@ -662,18 +669,18 @@ export default function App() {
                   <button
                     key={t.k}
                     onClick={() => setTab(t.k)}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm"
+                    className="flex-1 lg:flex-none min-w-0 flex flex-col lg:flex-row items-center justify-center gap-0.5 lg:gap-1.5 px-1.5 lg:px-3 py-1.5 lg:py-2 rounded-lg text-[11px] lg:text-sm"
                     style={{
                       background: tab === t.k ? T.panel2 : "transparent",
                       color: tab === t.k ? T.text : T.muted,
                       fontWeight: tab === t.k ? 600 : 400,
                     }}
                   >
-                    <t.icon size={15} /> {t.label}
+                    <t.icon size={15} className="shrink-0" /> <span className="truncate max-w-full">{t.label}</span>
                   </button>
                 ))}
             </nav>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span style={{ color: T.muted, fontSize: 12 }} className="flex items-center gap-1.5">
                 <span style={{ width: 7, height: 7, borderRadius: 999, background: dayOpen ? T.free : T.danger }} />
                 {dayOpen ? `Açıq gün: ${businessDay}` : `Bağlı gün: ${businessDay}`}
@@ -696,7 +703,7 @@ export default function App() {
                 </button>
               )}
               <span
-                className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-semibold"
+                className="hidden lg:flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm font-semibold"
                 style={{ background: T.panel2, color: isManager ? T.occupied : T.free }}
               >
                 {isManager ? <ShieldCheck size={15} /> : <User size={15} />}
@@ -2190,7 +2197,7 @@ function MenuSettingsPanel({ menu, onChange }) {
                 placeholder="Yeni məhsul adı"
                 value={f.name}
                 onChange={(e) => setNewItemForms((p) => ({ ...p, [cat.id]: { ...f, name: e.target.value } }))}
-                className="flex-1 px-2 py-1.5 rounded-lg text-xs"
+                className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-xs"
                 style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
               />
               <input
@@ -2220,7 +2227,7 @@ function MenuSettingsPanel({ menu, onChange }) {
           placeholder="Yeni bölmə adı (məs: Şirniyyat)"
           value={newCatName}
           onChange={(e) => setNewCatName(e.target.value)}
-          className="flex-1 px-3 py-2 rounded-lg text-sm"
+          className="flex-1 min-w-0 px-3 py-2 rounded-lg text-sm"
           style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text }}
         />
         <button
