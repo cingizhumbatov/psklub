@@ -481,6 +481,14 @@ export default function App() {
     showToast(`Daxilolma silindi — ${record.qty} ədəd ${menuItemLabel(settings.menu, record.item)}`, false);
   }
 
+  // Bütün anbar qalıqlarını 0-la və daxilolma tarixçəsini təmizlə
+  async function resetWarehouse() {
+    persistWarehouse({});
+    setIntakes([]);
+    await safeSet("stock-intakes", []);
+    showToast("Anbar sıfırlandı — bütün qalıqlar 0", false);
+  }
+
   // Hesabatdan səhv satış/sessiya qeydini sil — satılan stok anbara qaytarılır
   async function deleteSale(date, recordId) {
     const key = `sales:${date}`;
@@ -607,7 +615,7 @@ export default function App() {
           </div>
 
           {tab === "warehouse" && isManager ? (
-            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} onDeleteIntake={deleteStockIntake} />
+            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} onDeleteIntake={deleteStockIntake} onReset={resetWarehouse} />
           ) : tab === "reports" && isManager ? (
             <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} />
           ) : tab === "settings" && isManager ? (
@@ -1150,9 +1158,10 @@ function Modal({ title, children, onClose }) {
 }
 
 // ---------- WAREHOUSE ----------
-function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteIntake }) {
+function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteIntake, onReset }) {
   const [form, setForm] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(false);
   const todayAdditions = {};
   intakes.forEach((r) => {
     if (r.businessDay === businessDay) {
@@ -1162,6 +1171,39 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteI
 
   return (
     <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }}>Anbar</div>
+        {confirmReset ? (
+          <div className="flex items-center gap-2">
+            <span style={{ color: T.muted, fontSize: 12 }}>Bütün qalıqlar 0 olacaq.</span>
+            <button
+              onClick={() => {
+                onReset();
+                setConfirmReset(false);
+              }}
+              className="px-3 py-1.5 rounded-lg text-sm font-semibold"
+              style={{ background: T.danger, color: "#1A0A0F" }}
+            >
+              Təsdiqlə
+            </button>
+            <button
+              onClick={() => setConfirmReset(false)}
+              className="px-3 py-1.5 rounded-lg text-sm"
+              style={{ border: `1px solid ${T.border}`, color: T.muted }}
+            >
+              İmtina
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmReset(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold"
+            style={{ border: `1px solid ${T.danger}`, color: T.danger }}
+          >
+            <RotateCcw size={14} /> Anbarı sıfırla
+          </button>
+        )}
+      </div>
       {itemsByCategory(menu).map(({ cat, items }) =>
         items.length === 0 ? null : (
           <div key={cat.id} className="mb-5">
