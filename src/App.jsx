@@ -548,6 +548,17 @@ export default function App() {
     showToast(`${cabinLabel(settings, id)} sessiyası ləğv edildi`, false);
   }
 
+  // Aktiv sessiyaya vaxt əlavə et — bitmə vaxtı irəli çəkilir, bildiriş yenidən aktivləşir
+  function extendSession(id, minutes) {
+    const cabin = active[id];
+    if (!cabin || !minutes) return;
+    const base = Math.max(now, cabin.plannedEndTime || now);
+    const plannedEndTime = base + minutes * 60000;
+    const planMinutes = (cabin.planMinutes || 0) + minutes;
+    persistActive({ ...active, [id]: { ...cabin, plannedEndTime, planMinutes, notified: false } });
+    showToast(`${cabinLabel(settings, id)} — ${minutes} dəq əlavə edildi`, false);
+  }
+
   // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır
   async function deleteStockIntake(record) {
     const nextIntakes = intakes.filter((r) => r.id !== record.id);
@@ -717,7 +728,7 @@ export default function App() {
           ) : tab === "reports" && isManager ? (
             <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} />
           ) : tab === "settings" && isManager ? (
-            <SettingsView settings={settings} onSave={persistSettings} />
+            <SettingsView settings={settings} onSave={persistSettings} activeIds={Object.keys(active).map(Number)} />
           ) : (
             <Dashboard
               active={active}
@@ -754,6 +765,7 @@ export default function App() {
               onCheckout={checkoutCabin}
               onTransfer={transferCabin}
               onCancelSession={cancelSession}
+              onExtend={extendSession}
               onClose={() => setModalCabin(null)}
             />
           )}
@@ -1082,7 +1094,7 @@ function StartCabinModal({ id, settings, onPick, onClose }) {
 }
 
 // ---------- CABIN MODAL ----------
-function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onCancelSession, onClose }) {
+function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onCancelSession, onExtend, onClose }) {
   const [transferTarget, setTransferTarget] = useState("");
   const [confirmCancel, setConfirmCancel] = useState(false);
   const rate = settings.cabinRates?.[id] ?? 1.5;
@@ -1143,6 +1155,24 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
             <Timer size={15} color={T.muted} /> <span style={{ fontSize: 13, color: T.muted }}>Açıq vaxt (paketsiz)</span>
           </>
         )}
+      </div>
+
+      <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Vaxt artır</div>
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        {[
+          { label: "+30 dəq", minutes: 30 },
+          { label: "+1 saat", minutes: 60 },
+          { label: "+2 saat", minutes: 120 },
+        ].map((e) => (
+          <button
+            key={e.minutes}
+            onClick={() => onExtend(id, e.minutes)}
+            className="flex items-center justify-center gap-1 py-2 rounded-lg text-sm font-semibold"
+            style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text }}
+          >
+            <Plus size={13} color={T.amber} /> {e.label}
+          </button>
+        ))}
       </div>
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Stok əlavə et</div>
@@ -1823,11 +1853,13 @@ function MonthlyReport({ settings }) {
 }
 
 // ---------- SETTINGS ----------
-function SettingsView({ settings, onSave }) {
+function SettingsView({ settings, onSave, activeIds }) {
   const [form, setForm] = useState(settings);
   const [confirmReset, setConfirmReset] = useState(false);
   const [newCabinName, setNewCabinName] = useState("");
   const [newCabinRate, setNewCabinRate] = useState("1.5");
+  const [confirmDeleteCabin, setConfirmDeleteCabin] = useState(null);
+  const activeSet = new Set(activeIds || []);
 
   useEffect(() => setForm(settings), [settings]);
 
@@ -1860,6 +1892,17 @@ function SettingsView({ settings, onSave }) {
     setNewCabinName("");
   }
 
+  function deleteCabin(id) {
+    setForm((p) => {
+      const cabinRates = { ...p.cabinRates };
+      delete cabinRates[id];
+      const cabinNames = { ...(p.cabinNames || {}) };
+      delete cabinNames[id];
+      return { ...p, cabinRates, cabinNames };
+    });
+    setConfirmDeleteCabin(null);
+  }
+
   return (
     <div className="max-w-md">
       <div className="rounded-2xl p-5 mb-4" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
@@ -1887,6 +1930,28 @@ function SettingsView({ settings, onSave }) {
                 style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
               />
               <span style={{ fontSize: 12, color: T.muted }}>₼</span>
+              {confirmDeleteCabin === id ? (
+                <span className="flex items-center gap-1">
+                  <button
+                    onClick={() => deleteCabin(id)}
+                    className="px-2 py-1 rounded text-xs font-semibold"
+                    style={{ background: T.danger, color: "#1A0A0F" }}
+                  >
+                    Sil
+                  </button>
+                  <button onClick={() => setConfirmDeleteCabin(null)} className="px-2 py-1 rounded text-xs" style={{ color: T.muted }}>
+                    İmtina
+                  </button>
+                </span>
+              ) : activeSet.has(id) ? (
+                <span title="Aktiv sessiya var — silmək olmaz" style={{ color: T.muted, opacity: 0.4 }}>
+                  <Trash2 size={15} />
+                </span>
+              ) : (
+                <button onClick={() => setConfirmDeleteCabin(id)} title="Kabineti sil" className="p-0.5 rounded" style={{ color: T.muted }}>
+                  <Trash2 size={15} />
+                </button>
+              )}
             </div>
           ))}
         </div>
