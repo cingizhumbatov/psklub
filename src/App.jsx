@@ -82,14 +82,21 @@ function normalizeCabin(cabin, id) {
   return { orders: cabin.orders || [], segments: [{ cabinId: id, startTime: cabin.startTime, endTime: null }] };
 }
 
+// Vaxt paketi olan sessiyada zaman bitmə anında dayanır (vaxt/məbləğ davam etmir).
+// "Vaxt artır" plannedEndTime-ı irəli çəkərək yenidən davam etdirir.
+function cappedNow(cabin, now) {
+  return cabin.plannedEndTime ? Math.min(now, cabin.plannedEndTime) : now;
+}
 // A session can span multiple cabins if it was transferred; segments track each leg.
 function segElapsed(cabin, now) {
-  return cabin.segments.reduce((s, seg) => s + ((seg.endTime ?? now) - seg.startTime), 0);
+  const t = cappedNow(cabin, now);
+  return cabin.segments.reduce((s, seg) => s + ((seg.endTime ?? t) - seg.startTime), 0);
 }
 function segCost(cabin, now, cabinRates) {
   if (cabin.free) return 0; // Pulsuz sessiya — vaxt haqqı yoxdur
+  const t = cappedNow(cabin, now);
   return cabin.segments.reduce((s, seg) => {
-    const dur = (seg.endTime ?? now) - seg.startTime;
+    const dur = (seg.endTime ?? t) - seg.startTime;
     const rate = cabinRates?.[seg.cabinId] ?? 1.5;
     return s + (dur / 3600000) * rate;
   }, 0);
