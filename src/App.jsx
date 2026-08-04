@@ -4,6 +4,7 @@ import {
   ShoppingCart, RotateCcw, AlertTriangle, Package, PackagePlus, CheckCircle2, PlayCircle,
   Lock, LogOut, ShieldCheck, User, KeyRound, Trash2, AlarmClock, Timer, Gift,
   Infinity as InfinityIcon, ChevronDown, ChevronRight, Undo2,
+  Triangle, Circle, Square, UtensilsCrossed, ArrowLeft,
 } from "lucide-react";
 
 // Kabinet başlatma vaxt paketləri
@@ -197,6 +198,28 @@ export default function App() {
     }
   });
   const isManager = role === "manager";
+
+  // Kodsuz açıq menyu (QR üçün): #menu hash-ı ilə birbaşa açılır
+  const [showMenu, setShowMenu] = useState(() => {
+    try {
+      return (window.location.hash || "").replace("#", "") === "menu";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    const onHash = () => setShowMenu((window.location.hash || "").replace("#", "") === "menu");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  function openMenu() {
+    window.location.hash = "menu";
+    setShowMenu(true);
+  }
+  function closeMenu() {
+    if (window.location.hash) window.location.hash = "";
+    setShowMenu(false);
+  }
 
   function login(r) {
     setRole(r);
@@ -735,10 +758,12 @@ export default function App() {
         input[type=date], input[type=month], input[type=time], input[type=number] { color-scheme: dark; }
       `}</style>
 
-      {loading ? (
+      {showMenu ? (
+        <PublicMenu onBack={closeMenu} />
+      ) : loading ? (
         <div style={{ color: T.muted }} className="text-center py-20">Yüklənir…</div>
       ) : !role ? (
-        <LoginView settings={settings} onLogin={login} />
+        <LoginView settings={settings} onLogin={login} onMenu={openMenu} />
       ) : (
         <>
           {/* Header */}
@@ -911,7 +936,7 @@ export default function App() {
 }
 
 // ---------- LOGIN ----------
-function LoginView({ settings, onLogin }) {
+function LoginView({ settings, onLogin, onMenu }) {
   const [selected, setSelected] = useState(null); // "worker" | "manager"
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
@@ -967,6 +992,20 @@ function LoginView({ settings, onLogin }) {
                   </div>
                 </button>
               ))}
+
+              <button
+                onClick={onMenu}
+                className="flex items-center gap-3 rounded-xl p-3.5 text-left"
+                style={{ background: "transparent", border: `1px solid ${T.border}` }}
+              >
+                <div style={{ background: T.panel, borderRadius: 10 }} className="p-2.5">
+                  <UtensilsCrossed size={20} color={T.amber} />
+                </div>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>Menyu</div>
+                  <div style={{ color: T.muted, fontSize: 12 }}>Qiymət siyahısı — kodsuz açıq</div>
+                </div>
+              </button>
             </div>
           </>
         ) : (
@@ -1010,6 +1049,126 @@ function LoginView({ settings, onLogin }) {
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- PUBLIC MENU (QR) ----------
+function PublicMenu({ onBack }) {
+  const [menu, setMenu] = useState(null);
+  const [warehouse, setWarehouse] = useState({});
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      const s = await safeGet("settings");
+      const w = await safeGet("warehouse");
+      if (!alive) return;
+      setMenu(s ? normalizeSettings(s).menu : DEFAULT_MENU);
+      setWarehouse(w || {});
+    };
+    load();
+    const id = setInterval(load, 10000); // menyu avtomatik təzələnir
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  const psSymbols = [
+    { Icon: Triangle, color: "#38BDF8" },
+    { Icon: Circle, color: "#FB7185" },
+    { Icon: Square, color: "#A855F7" },
+    { Icon: X, color: "#3B82F6" },
+  ];
+
+  return (
+    <div className="w-full flex flex-col items-center" style={{ minHeight: "100%" }}>
+      <div className="w-full" style={{ maxWidth: 480 }}>
+        {onBack && (
+          <button onClick={onBack} className="flex items-center gap-1.5 mb-3 text-sm" style={{ color: T.muted }}>
+            <ArrowLeft size={16} /> Geri
+          </button>
+        )}
+
+        {/* Brend başlığı */}
+        <div
+          className="rounded-3xl px-6 py-7 mb-6 text-center"
+          style={{
+            background: "radial-gradient(120% 130% at 50% 0%, #141B33 0%, #0B0D14 72%)",
+            border: `1px solid ${T.occupied}`,
+            boxShadow: "0 0 45px rgba(59,130,246,0.28)",
+          }}
+        >
+          <div className="flex items-center justify-center gap-4 mb-3">
+            {psSymbols.map((s, i) => (
+              <s.Icon key={i} size={22} color={s.color} strokeWidth={2.5} style={{ filter: `drop-shadow(0 0 6px ${s.color})` }} />
+            ))}
+          </div>
+          <div
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 700,
+              fontSize: 46,
+              lineHeight: 1,
+              letterSpacing: 1,
+              background: "linear-gradient(180deg, #EAEEF9 0%, #A6BAE6 45%, #3B82F6 100%)",
+              WebkitBackgroundClip: "text",
+              backgroundClip: "text",
+              color: "transparent",
+            }}
+          >
+            50 QƏPİK
+          </div>
+          <div style={{ color: T.occupied, fontSize: 12, fontWeight: 600, letterSpacing: 5 }} className="mt-1.5">
+            PLAYSTATION CLUB
+          </div>
+        </div>
+
+        <div style={{ color: T.muted, fontSize: 12, letterSpacing: 2 }} className="mb-3 text-center uppercase">
+          Menyu · Qiymət siyahısı
+        </div>
+
+        {menu === null ? (
+          <div style={{ color: T.muted }} className="text-center py-10">Yüklənir…</div>
+        ) : (
+          menu.categories.map((cat) => {
+            const items = menu.items.filter((it) => it.categoryId === cat.id);
+            if (items.length === 0) return null;
+            const Icon = categoryIcon(cat.id);
+            return (
+              <div key={cat.id} className="mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Icon size={16} color={T.occupied} />
+                  <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15 }}>{cat.name}</span>
+                </div>
+                <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+                  {items.map((it, i) => {
+                    const out = (warehouse[it.id] || 0) <= 0;
+                    return (
+                      <div
+                        key={it.id}
+                        className="flex items-center justify-between px-4 py-3"
+                        style={{ background: i % 2 ? T.panel : T.panel2, opacity: out ? 0.5 : 1 }}
+                      >
+                        <span style={{ fontSize: 15 }}>
+                          {it.name}
+                          {out && <span style={{ color: T.danger, fontSize: 11, marginLeft: 8 }}>bitib</span>}
+                        </span>
+                        <span style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 600, color: T.amber }}>{money(it.price)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })
+        )}
+
+        <div style={{ color: T.muted, fontSize: 11 }} className="text-center mt-5 mb-8 flex items-center justify-center gap-2">
+          <Gamepad2 size={13} color={T.free} /> 50 Qəpik PlayStation Club
+        </div>
       </div>
     </div>
   );
