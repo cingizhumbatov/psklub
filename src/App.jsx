@@ -615,6 +615,42 @@ export default function App() {
     return next;
   }
 
+  // Bağlanmış qeyddən 1 ədəd mal geri qaytar — məbləğ gəlirdən çıxılır, mal stoka qayıdır
+  async function returnSaleItem(date, recordId, itemId) {
+    const key = `sales:${date}`;
+    const list = (await safeGet(key)) || [];
+    let returned = 0;
+    let unitPrice = 0;
+    const next = list.map((r) => {
+      if (r.id !== recordId) return r;
+      const orders = [];
+      (r.orders || []).forEach((o) => {
+        if (o.item === itemId && returned === 0) {
+          returned = 1;
+          unitPrice = o.unitPrice;
+          if (o.qty - 1 > 0) orders.push({ ...o, qty: o.qty - 1 });
+        } else {
+          orders.push(o);
+        }
+      });
+      const stockTotal = round2(orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
+      const grandTotal = round2((r.cabinCost || 0) + stockTotal);
+      return { ...r, orders, stockTotal, grandTotal };
+    });
+    if (returned === 0) return list;
+    // Tam boşalmış (yalnız stok satışı) qeydi çıxar
+    const cleaned = next.filter((r) => (r.orders && r.orders.length > 0) || (r.cabinCost || 0) > 0);
+    const ok = await safeSet(key, cleaned);
+    if (!ok) {
+      showToast("Qaytarılmadı", true);
+      return list;
+    }
+    if (date === businessDay) setTodaySales(cleaned);
+    persistWarehouse({ ...warehouse, [itemId]: round2((warehouse[itemId] || 0) + returned) });
+    showToast(`${returned} ədəd ${menuItemLabel(settings.menu, itemId)} qaytarıldı — ${money(unitPrice * returned)} çıxıldı`, false);
+    return cleaned;
+  }
+
   const activeCount = Object.keys(active).length;
   // "Günün gəliri" yalnız cari açıq günə aiddir. Gün bağlananda 0-lanır,
   // yeni gün açılanda (eyni tarixdə olsa belə) sıfırdan başlayır.
@@ -742,7 +778,7 @@ export default function App() {
           {tab === "warehouse" && isManager ? (
             <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdjust={adjustStock} onMenuChange={updateMenu} onDeleteIntake={deleteStockIntake} onReset={resetWarehouse} />
           ) : tab === "reports" && isManager ? (
-            <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} />
+            <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} onReturnItem={returnSaleItem} />
           ) : tab === "settings" && isManager ? (
             <SettingsView settings={settings} onSave={persistSettings} activeIds={Object.keys(active).map(Number)} />
           ) : (
@@ -1746,7 +1782,7 @@ function OpenDayModal({ menu, warehouse, canAddStock = true, onClose, onConfirm 
 }
 
 // ---------- REPORTS ----------
-function Reports({ businessDay, settings, onDeleteSale }) {
+function Reports({ businessDay, settings, onDeleteSale, onReturnItem }) {
   const [mode, setMode] = useState("daily");
   return (
     <div>
@@ -1762,15 +1798,16 @@ function Reports({ businessDay, settings, onDeleteSale }) {
           </button>
         ))}
       </div>
-      {mode === "daily" ? <DailyReport defaultDate={businessDay} settings={settings} onDeleteSale={onDeleteSale} /> : <MonthlyReport settings={settings} />}
+      {mode === "daily" ? <DailyReport defaultDate={businessDay} settings={settings} onDeleteSale={onDeleteSale} onReturnItem={onReturnItem} /> : <MonthlyReport settings={settings} />}
     </div>
   );
 }
 
-function DailyReport({ defaultDate, settings, onDeleteSale }) {
+function DailyReport({ defaultDate, settings, onDeleteSale, onReturnItem }) {
   const [date, setDate] = useState(defaultDate || todayStr());
   const [sales, setSales] = useState(null);
   const [confirmDel, setConfirmDel] = useState(null);
+  const [openRec, setOpenRec] = useState(null);
 
   useEffect(() => {
     (async () => setSales((await safeGet(`sales:${date}`)) || []))();
@@ -1780,6 +1817,10 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
     const next = await onDeleteSale(date, recordId);
     setSales(next);
     setConfirmDel(null);
+  }
+  async function handleReturn(recordId, itemId) {
+    const next = await onReturnItem(date, recordId, itemId);
+    setSales(next);
   }
 
   if (sales === null) return <div style={{ color: T.muted }}>Yüklənir…</div>;
@@ -1816,6 +1857,53 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
       </button>
     );
 
+  const recordBlock = (r, i, headerLeft, headerMid) => {
+    const isOpen = openRec === r.id;
+    const returnable = r.orders && r.orders.length > 0;
+    return (
+      <div key={r.id} style={{ background: i % 2 ? T.panel : T.panel2 }}>
+        <div className="flex items-center gap-2 px-4 py-3">
+          {returnable ? (
+            <button onClick={() => setOpenRec(isOpen ? null : r.id)} className="p-0.5 shrink-0" style={{ color: T.muted }} title="Qaytarma">
+              {isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+            </button>
+          ) : (
+            <span style={{ width: 20 }} className="shrink-0" />
+          )}
+          <span style={{ fontSize: 14, flex: 1, minWidth: 0 }} className="truncate">{headerLeft}</span>
+          <span style={{ color: T.muted, fontSize: 13 }} className="shrink-0">{headerMid}</span>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 60, textAlign: "right" }} className="shrink-0">{money(r.grandTotal)}</span>
+          {delControl(r.id)}
+        </div>
+        {isOpen && returnable && (
+          <div className="px-4 pb-3 pt-1 flex flex-col gap-1.5" style={{ borderTop: `1px solid ${T.border}` }}>
+            <div style={{ color: T.muted, fontSize: 11, letterSpacing: 0.4 }} className="mt-2 uppercase">Səhv malı geri qaytar</div>
+            {r.orders.map((o) => (
+              <div key={o.item} className="flex items-center justify-between rounded-lg px-2.5 py-1.5" style={{ background: T.panel2 }}>
+                <span style={{ fontSize: 13 }}>
+                  {menuItemLabel(settings.menu, o.item)} ×{o.qty}
+                  <span style={{ color: T.muted }}> · {money(o.unitPrice)}</span>
+                </span>
+                <button
+                  onClick={() => handleReturn(r.id, o.item)}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold shrink-0"
+                  style={{ background: T.panel, border: `1px solid ${T.danger}`, color: T.danger }}
+                >
+                  <RotateCcw size={12} /> 1 qaytar
+                </button>
+              </div>
+            ))}
+            {(r.cabinCost || 0) > 0 && (
+              <div style={{ color: T.muted, fontSize: 12 }} className="mt-1">
+                Kabinet vaxtı: {money(r.cabinCost)} (vaxt haqqı qaytarılmır)
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div>
       <input
@@ -1851,16 +1939,14 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
         {sessions.length === 0 && (
           <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Bu gün üçün sessiya yoxdur</div>
         )}
-        {sessions.map((r, i) => (
-          <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
-            <span style={{ fontSize: 14, flex: 1 }}>
-              {r.segments && r.segments.length > 1 ? r.segments.map((s) => cabinLabel(settings, s.cabinId)).join(" → ") : cabinLabel(settings, r.cabinetId)}
-            </span>
-            <span style={{ color: T.muted, fontSize: 13 }}>{fmtTime(r.startTime)}–{fmtTime(r.endTime)} · {r.minutes} dəq</span>
-            <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 64, textAlign: "right" }}>{money(r.grandTotal)}</span>
-            {delControl(r.id)}
-          </div>
-        ))}
+        {sessions.map((r, i) =>
+          recordBlock(
+            r,
+            i,
+            r.segments && r.segments.length > 1 ? r.segments.map((s) => cabinLabel(settings, s.cabinId)).join(" → ") : cabinLabel(settings, r.cabinetId),
+            `${fmtTime(r.startTime)}–${fmtTime(r.endTime)} · ${r.minutes} dəq`
+          )
+        )}
       </div>
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Stok satışları ({stockSales.length})</div>
@@ -1868,16 +1954,14 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
         {stockSales.length === 0 ? (
           <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Bu gün kabinetsiz stok satışı yoxdur</div>
         ) : (
-          stockSales.map((r, i) => (
-            <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
-              <span style={{ fontSize: 14, flex: 1 }}>
-                {r.orders?.map((o) => `${menuItemLabel(settings.menu, o.item)}×${o.qty}`).join(", ") || "Stok satışı"}
-              </span>
-              <span style={{ color: T.muted, fontSize: 13 }}>{r.endTime ? fmtTime(r.endTime) : ""}</span>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 64, textAlign: "right" }}>{money(r.grandTotal)}</span>
-              {delControl(r.id)}
-            </div>
-          ))
+          stockSales.map((r, i) =>
+            recordBlock(
+              r,
+              i,
+              r.orders?.map((o) => `${menuItemLabel(settings.menu, o.item)}×${o.qty}`).join(", ") || "Stok satışı",
+              r.endTime ? fmtTime(r.endTime) : ""
+            )
+          )
         )}
       </div>
     </div>
