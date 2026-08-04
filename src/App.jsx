@@ -323,15 +323,31 @@ export default function App() {
     if (!ok) showToast("Anbar qalığı saxlanmadı", true);
   }
 
-  async function addStockIntake(item, qty) {
-    if (!(qty > 0)) return;
-    persistWarehouse({ ...warehouse, [item]: round2((warehouse[item] || 0) + qty) });
-    const record = { id: `in-${Date.now()}`, item, qty, timestamp: Date.now(), businessDay };
+  // Anbar qalığını artır (+) və ya azalt (−). Qalıq 0-dan aşağı düşmür.
+  async function adjustStock(item, delta) {
+    if (!delta) return;
+    const current = warehouse[item] || 0;
+    const nextQty = round2(Math.max(0, current + delta));
+    const applied = round2(nextQty - current);
+    if (applied === 0) return;
+    persistWarehouse({ ...warehouse, [item]: nextQty });
+    const record = { id: `in-${Date.now()}`, item, qty: applied, timestamp: Date.now(), businessDay };
     const nextIntakes = [record, ...intakes].slice(0, 80);
     setIntakes(nextIntakes);
     const ok = await safeSet("stock-intakes", nextIntakes);
     if (!ok) showToast("Tarixçə saxlanmadı", true);
-    showToast(`Anbara ${qty} ədəd ${menuItemLabel(settings.menu, item)} əlavə edildi`, false);
+    const label = menuItemLabel(settings.menu, item);
+    showToast(
+      applied > 0 ? `Anbara ${applied} ədəd ${label} əlavə edildi` : `Anbardan ${-applied} ədəd ${label} çıxarıldı`,
+      false
+    );
+  }
+
+  // Menyu strukturunu (bölmə/məhsul) yenilə — Anbardan da əlavə edilə bilər
+  function updateMenu(menu) {
+    const next = { ...settings, menu };
+    setSettings(next);
+    safeSet("settings", next);
   }
 
   // "Başlat" düyməsi paket seçimi modalını açır
@@ -717,7 +733,7 @@ export default function App() {
           )}
 
           {tab === "warehouse" && isManager ? (
-            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdd={addStockIntake} onDeleteIntake={deleteStockIntake} onReset={resetWarehouse} />
+            <WarehouseView menu={settings.menu} warehouse={warehouse} intakes={intakes} businessDay={businessDay} onAdjust={adjustStock} onMenuChange={updateMenu} onDeleteIntake={deleteStockIntake} onReset={resetWarehouse} />
           ) : tab === "reports" && isManager ? (
             <Reports businessDay={businessDay} settings={settings} onDeleteSale={deleteSale} />
           ) : tab === "settings" && isManager ? (
@@ -1383,16 +1399,40 @@ function Modal({ title, children, onClose }) {
 }
 
 // ---------- WAREHOUSE ----------
-function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteIntake, onReset }) {
-  const [form, setForm] = useState({});
+function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenuChange, onDeleteIntake, onReset }) {
+  const [amounts, setAmounts] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+  const [addItemForms, setAddItemForms] = useState({}); // catId -> {name, price} | undefined
+
   const todayAdditions = {};
   intakes.forEach((r) => {
     if (r.businessDay === businessDay) {
       todayAdditions[r.item] = (todayAdditions[r.item] || 0) + r.qty;
     }
   });
+
+  function apply(itemId, sign) {
+    const raw = parseInt(amounts[itemId], 10);
+    const n = raw > 0 ? raw : 1;
+    onAdjust(itemId, sign * n);
+    setAmounts((p) => ({ ...p, [itemId]: "" }));
+  }
+  function addCategory() {
+    const name = newCatName.trim();
+    if (!name) return;
+    onMenuChange({ ...menu, categories: [...menu.categories, { id: `cat-${Date.now()}`, name }] });
+    setNewCatName("");
+  }
+  function addItem(catId) {
+    const f = addItemForms[catId] || {};
+    const name = (f.name || "").trim();
+    const price = parseFloat(f.price) || 0;
+    if (!name) return;
+    onMenuChange({ ...menu, items: [...menu.items, { id: `item-${Date.now()}`, name, categoryId: catId, price }] });
+    setAddItemForms((p) => ({ ...p, [catId]: undefined }));
+  }
 
   return (
     <div>
@@ -1429,62 +1469,124 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteI
           </button>
         )}
       </div>
-      {itemsByCategory(menu).map(({ cat, items }) =>
-        items.length === 0 ? null : (
-          <div key={cat.id} className="mb-5">
-            <div style={{ color: T.muted, fontSize: 12, fontWeight: 600, letterSpacing: 0.4 }} className="mb-2 uppercase">
-              {cat.name}
+
+      {menu.categories.map((cat) => {
+        const items = menu.items.filter((it) => it.categoryId === cat.id);
+        const Icon = categoryIcon(cat.id);
+        const addForm = addItemForms[cat.id];
+        return (
+          <div key={cat.id} className="mb-4 rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+            <div className="flex items-center justify-between px-3 py-2.5" style={{ background: T.panel2 }}>
+              <span className="flex items-center gap-2" style={{ fontWeight: 600, fontSize: 14 }}>
+                <Icon size={15} color={T.muted} /> {cat.name}
+              </span>
+              <button
+                onClick={() => setAddItemForms((p) => ({ ...p, [cat.id]: p[cat.id] ? undefined : { name: "", price: "" } }))}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0"
+                style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
+              >
+                <Plus size={13} color={T.free} /> Məhsul
+              </button>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {items.map((it) => {
+
+            {addForm && (
+              <div className="flex gap-2 px-3 py-2.5" style={{ background: T.panel, borderTop: `1px solid ${T.border}` }}>
+                <input
+                  placeholder="Məhsul adı"
+                  value={addForm.name}
+                  onChange={(e) => setAddItemForms((p) => ({ ...p, [cat.id]: { ...addForm, name: e.target.value } }))}
+                  className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-sm"
+                  style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text }}
+                />
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  placeholder="qiymət"
+                  value={addForm.price}
+                  onChange={(e) => setAddItemForms((p) => ({ ...p, [cat.id]: { ...addForm, price: e.target.value } }))}
+                  className="w-20 px-2 py-1.5 rounded-lg text-sm"
+                  style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                />
+                <button
+                  onClick={() => addItem(cat.id)}
+                  className="px-3 rounded-lg text-sm font-semibold shrink-0"
+                  style={{ background: T.free, color: "#0B0D14" }}
+                >
+                  Əlavə
+                </button>
+              </div>
+            )}
+
+            {items.length === 0 ? (
+              <div className="px-3 py-3 text-sm" style={{ color: T.muted, borderTop: `1px solid ${T.border}` }}>
+                Bu bölmədə məhsul yoxdur
+              </div>
+            ) : (
+              items.map((it) => {
                 const qty = warehouse[it.id] || 0;
                 const low = qty <= 5;
                 const addedToday = todayAdditions[it.id] || 0;
                 return (
-                  <div key={it.id} className="rounded-2xl p-4" style={{ background: T.panel, border: `1px solid ${low ? T.danger : T.border}` }}>
-                    <div className="mb-2 flex items-center justify-between">
-                      <span style={{ fontSize: 14 }}>{it.name}</span>
-                      {addedToday > 0 && <span style={{ color: T.free, fontSize: 12, fontFamily: FONT_MONO }}>bugün +{addedToday}</span>}
+                  <div key={it.id} className="flex items-center gap-2 px-3 py-2.5" style={{ background: T.panel, borderTop: `1px solid ${T.border}` }}>
+                    <div className="flex-1 min-w-0">
+                      <div style={{ fontSize: 14 }} className="truncate">{it.name}</div>
+                      <div style={{ color: T.muted, fontSize: 11 }}>
+                        {money(it.price)}
+                        {addedToday !== 0 && (
+                          <span style={{ color: addedToday > 0 ? T.free : T.danger }}>
+                            {" · bugün "}
+                            {addedToday > 0 ? "+" : ""}
+                            {addedToday}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ fontFamily: FONT_MONO, fontSize: 30, fontWeight: 600, color: low ? T.danger : T.text }} className="mb-3">
+                    <span
+                      style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 600, color: low ? T.danger : T.text, minWidth: 30, textAlign: "right" }}
+                    >
                       {qty}
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        type="number"
-                        min="0"
-                        placeholder="say"
-                        value={form[it.id] || ""}
-                        onChange={(e) => setForm((p) => ({ ...p, [it.id]: e.target.value }))}
-                        className="w-full px-2 py-1.5 rounded-lg text-sm"
-                        style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
-                      />
-                      <button
-                        onClick={() => {
-                          const q = parseInt(form[it.id], 10);
-                          if (q > 0) {
-                            onAdd(it.id, q);
-                            setForm((p) => ({ ...p, [it.id]: "" }));
-                          }
-                        }}
-                        className="px-3 rounded-lg flex items-center gap-1 text-sm font-semibold shrink-0"
-                        style={{ background: T.free, color: "#0B0D14" }}
-                      >
-                        <PackagePlus size={14} /> Əlavə et
-                      </button>
-                    </div>
+                    </span>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="1"
+                      value={amounts[it.id] || ""}
+                      onChange={(e) => setAmounts((p) => ({ ...p, [it.id]: e.target.value }))}
+                      className="w-12 px-1 py-1.5 rounded-lg text-center text-sm"
+                      style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                    />
+                    <IconBtn onClick={() => apply(it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
+                    <IconBtn onClick={() => apply(it.id, 1)}><Plus size={14} color={T.free} /></IconBtn>
                   </div>
                 );
-              })}
-            </div>
+              })
+            )}
           </div>
-        )
-      )}
+        );
+      })}
 
-      <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Son daxilolmalar</div>
+      <div className="flex gap-2 mb-5">
+        <input
+          placeholder="Yeni bölmə adı (məs: Şirniyyat)"
+          value={newCatName}
+          onChange={(e) => setNewCatName(e.target.value)}
+          className="flex-1 min-w-0 px-3 py-2 rounded-lg text-sm"
+          style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text }}
+        />
+        <button
+          onClick={addCategory}
+          className="flex items-center gap-1.5 px-3 rounded-lg text-sm font-semibold shrink-0"
+          style={{ background: T.occupied, color: "#0B0D14" }}
+        >
+          <Plus size={14} /> Yeni bölmə
+        </button>
+      </div>
+
+      <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Son hərəkətlər</div>
       <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
         {intakes.length === 0 ? (
-          <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Hələ anbara mal daxil edilməyib</div>
+          <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Hələ anbar hərəkəti yoxdur</div>
         ) : (
           intakes.slice(0, 15).map((r, i) => (
             <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
@@ -1492,7 +1594,10 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteI
               <span style={{ color: T.muted, fontSize: 13 }}>
                 {new Date(r.timestamp).toLocaleDateString("az-AZ")} {fmtTime(r.timestamp)}
               </span>
-              <span style={{ fontFamily: FONT_MONO, fontSize: 14, color: T.free, minWidth: 34, textAlign: "right" }}>+{r.qty}</span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 14, color: r.qty >= 0 ? T.free : T.danger, minWidth: 40, textAlign: "right" }}>
+                {r.qty > 0 ? "+" : ""}
+                {r.qty}
+              </span>
               {confirmDelete === r.id ? (
                 <div className="flex items-center gap-1">
                   <button
@@ -1510,7 +1615,7 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdd, onDeleteI
                   </button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmDelete(r.id)} title="Daxilolmanı sil" className="p-1 rounded" style={{ color: T.muted }}>
+                <button onClick={() => setConfirmDelete(r.id)} title="Hərəkəti sil" className="p-1 rounded" style={{ color: T.muted }}>
                   <Trash2 size={15} />
                 </button>
               )}
