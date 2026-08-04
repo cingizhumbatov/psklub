@@ -747,6 +747,7 @@ export default function App() {
               activeCount={activeCount}
               todayRevenue={todayRevenue}
               dayOpen={dayOpen}
+              isManager={isManager}
               onStart={openStartPicker}
               onOpen={setModalCabin}
               onStockSale={() => setStockModalOpen(true)}
@@ -911,7 +912,7 @@ function LoginView({ settings, onLogin }) {
 }
 
 // ---------- DASHBOARD ----------
-function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue, dayOpen, onStart, onOpen, onStockSale }) {
+function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue, dayOpen, isManager, onStart, onOpen, onStockSale }) {
   const cabinIds = cabinIdsOf(settings);
   return (
     <div>
@@ -924,8 +925,12 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
         </div>
       )}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-        <StatCard label="Aktiv kabinet" value={`${activeCount} / ${cabinIds.length}`} icon={Power} color={T.occupied} />
-        <StatCard label="Günün gəliri" value={money(todayRevenue)} icon={BarChart3} color={T.amber} mono />
+        {isManager && (
+          <StatCard label="Aktiv kabinet" value={`${activeCount} / ${cabinIds.length}`} icon={Power} color={T.occupied} />
+        )}
+        {isManager && (
+          <StatCard label="Günün gəliri" value={money(todayRevenue)} icon={BarChart3} color={T.amber} mono />
+        )}
         <button
           onClick={dayOpen ? onStockSale : undefined}
           className="rounded-2xl p-4 flex items-center gap-3 text-left"
@@ -941,26 +946,28 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
         </button>
       </div>
 
-      <div className="flex gap-2 mb-5 flex-wrap">
-        {settings.menu.items.map((it) => {
-          const qty = warehouse[it.id] || 0;
-          const low = qty <= 5;
-          const Icon = categoryIcon(it.categoryId);
-          return (
-            <div
-              key={it.id}
-              className="flex items-center gap-2 px-3 py-2 rounded-xl"
-              style={{ background: T.panel, border: `1px solid ${low ? T.danger : T.border}` }}
-            >
-              <Icon size={14} color={T.muted} />
-              <span style={{ fontSize: 13, color: T.muted }}>{it.name} anbarda:</span>
-              <span style={{ fontFamily: FONT_MONO, fontWeight: 600, color: low ? T.danger : T.text }}>{qty}</span>
-            </div>
-          );
-        })}
-      </div>
+      {isManager && (
+        <div className="flex gap-2 mb-5 flex-wrap">
+          {settings.menu.items.map((it) => {
+            const qty = warehouse[it.id] || 0;
+            const low = qty <= 5;
+            const Icon = categoryIcon(it.categoryId);
+            return (
+              <div
+                key={it.id}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl"
+                style={{ background: T.panel, border: `1px solid ${low ? T.danger : T.border}` }}
+              >
+                <Icon size={14} color={T.muted} />
+                <span style={{ fontSize: 13, color: T.muted }}>{it.name} anbarda:</span>
+                <span style={{ fontFamily: FONT_MONO, fontWeight: 600, color: low ? T.danger : T.text }}>{qty}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 ${isManager ? "" : "mt-5"}`}>
         {cabinIds.map((id) => {
           const cabin = active[id];
           const busy = !!cabin;
