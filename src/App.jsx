@@ -255,6 +255,16 @@ export default function App() {
     setTimeout(() => setToast(null), 3500);
   }, []);
 
+  // Avtomatik sinxronizasiya: son lokal yazma vaxtı (poll onu qısa müddət üstələməsin)
+  const lastWriteRef = useRef(0);
+  const businessDayRef = useRef(businessDay);
+  useEffect(() => {
+    businessDayRef.current = businessDay;
+  }, [businessDay]);
+  const markWrite = () => {
+    lastWriteRef.current = Date.now();
+  };
+
   // Vaxt bitmə bildirişi üçün səs (istifadəçi klik etdikdə hazırlanır)
   const audioRef = useRef(null);
   function primeAudio() {
@@ -288,6 +298,7 @@ export default function App() {
   }
 
   async function persistActive(next) {
+    markWrite();
     setActive(next);
     const ok = await safeSet("active-sessions", next);
     if (!ok) showToast("Sessiya yadda saxlanmadı", true);
@@ -309,13 +320,55 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now, active, settings]);
 
+  // Avtomatik sinxronizasiya — başqa cihazdakı dəyişikliklər (məs. müdir anbara mal əlavə edir)
+  // əl ilə yeniləmə olmadan bir neçə saniyə ərzində bütün cihazlarda görünsün.
+  useEffect(() => {
+    if (loading || !role) return;
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const sync = async () => {
+      if (Date.now() - lastWriteRef.current < 2500) return; // lokal dəyişikliyi üstələmə
+      const bd = (await safeGet("current-business-day")) || businessDayRef.current;
+      const [s, a, w, ik, doStored, openedAt, t] = await Promise.all([
+        safeGet("settings"),
+        safeGet("active-sessions"),
+        safeGet("warehouse"),
+        safeGet("stock-intakes"),
+        safeGet("day-open"),
+        safeGet("day-opened-at"),
+        safeGet(`sales:${bd}`),
+      ]);
+      if (Date.now() - lastWriteRef.current < 2500) return; // await-dən sonra təkrar yoxla
+      if (s) {
+        const ns = normalizeSettings(s);
+        setSettings((prev) => (same(prev, ns) ? prev : ns));
+      }
+      if (a) {
+        const norm = {};
+        Object.entries(a).forEach(([cid, cab]) => {
+          norm[cid] = normalizeCabin(cab, Number(cid));
+        });
+        setActive((prev) => (same(prev, norm) ? prev : norm));
+      }
+      if (w) setWarehouse((prev) => (same(prev, w) ? prev : w));
+      if (ik) setIntakes((prev) => (same(prev, ik) ? prev : ik));
+      if (doStored !== null) setDayOpen((prev) => (prev === doStored ? prev : doStored));
+      if (openedAt != null) setDayOpenedAt((prev) => (prev === openedAt ? prev : openedAt));
+      if (bd) setBusinessDay((prev) => (prev === bd ? prev : bd));
+      if (t) setTodaySales((prev) => (same(prev, t) ? prev : t));
+    };
+    const id = setInterval(sync, 4000);
+    return () => clearInterval(id);
+  }, [loading, role]);
+
   async function persistSettings(next) {
+    markWrite();
     setSettings(next);
     const ok = await safeSet("settings", next);
     showToast(ok ? "Ayarlar saxlanıldı" : "Ayarlar saxlanmadı", !ok);
   }
 
   async function appendSale(record) {
+    markWrite();
     const key = `sales:${businessDay}`;
     const existing = (await safeGet(key)) || [];
     const next = [...existing, record];
@@ -325,6 +378,7 @@ export default function App() {
   }
 
   async function persistWarehouse(next) {
+    markWrite();
     setWarehouse(next);
     const ok = await safeSet("warehouse", next);
     if (!ok) showToast("Anbar qalığı saxlanmadı", true);
@@ -352,6 +406,7 @@ export default function App() {
 
   // Menyu strukturunu (bölmə/məhsul) yenilə — Anbardan da əlavə edilə bilər
   function updateMenu(menu) {
+    markWrite();
     const next = { ...settings, menu };
     setSettings(next);
     safeSet("settings", next);
@@ -458,6 +513,7 @@ export default function App() {
   }
 
   async function closeDay(closeTimeMs) {
+    markWrite();
     const ids = Object.keys(active).map(Number);
     const dayKey = `sales:${businessDay}`;
     let merged = (await safeGet(dayKey)) || [];
@@ -498,6 +554,7 @@ export default function App() {
   }
 
   async function openDay(dateLabel, stockAdditions) {
+    markWrite();
     const bd = dateLabel || todayStr();
     const openedAt = Date.now();
     await safeSet("current-business-day", bd);
@@ -594,6 +651,7 @@ export default function App() {
 
   // Hesabatdan səhv satış/sessiya qeydini sil — satılan stok anbara qaytarılır
   async function deleteSale(date, recordId) {
+    markWrite();
     const key = `sales:${date}`;
     const list = (await safeGet(key)) || [];
     const rec = list.find((r) => r.id === recordId);
@@ -617,6 +675,7 @@ export default function App() {
 
   // Bağlanmış qeyddən 1 ədəd mal geri qaytar — məbləğ gəlirdən çıxılır, mal stoka qayıdır
   async function returnSaleItem(date, recordId, itemId) {
+    markWrite();
     const key = `sales:${date}`;
     const list = (await safeGet(key)) || [];
     let returned = 0;
