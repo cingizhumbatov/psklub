@@ -1686,6 +1686,7 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
   const [confirmReset, setConfirmReset] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [addItemForms, setAddItemForms] = useState({}); // catId -> {name, price} | undefined
+  const [confirmDeleteItem, setConfirmDeleteItem] = useState(null);
 
   const todayAdditions = {};
   intakes.forEach((r) => {
@@ -1714,30 +1715,34 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
     onMenuChange({ ...menu, items: [...menu.items, { id: `item-${Date.now()}`, name, categoryId: catId, price }] });
     setAddItemForms((p) => ({ ...p, [catId]: undefined }));
   }
+  function deleteItem(itemId) {
+    onMenuChange({ ...menu, items: menu.items.filter((it) => it.id !== itemId) });
+    setConfirmDeleteItem(null);
+  }
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
         <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 16 }}>Anbar</div>
         {confirmReset ? (
-          <div className="flex items-center gap-2">
-            <span style={{ color: T.muted, fontSize: 12 }}>Bütün qalıqlar 0 olacaq.</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span style={{ color: T.danger, fontSize: 13, fontWeight: 600 }}>Anbar tam sıfırlansın?</span>
             <button
               onClick={() => {
                 onReset();
                 setConfirmReset(false);
               }}
-              className="px-3 py-1.5 rounded-lg text-sm font-semibold"
+              className="px-4 py-1.5 rounded-lg text-sm font-semibold"
               style={{ background: T.danger, color: "#1A0A0F" }}
             >
-              Təsdiqlə
+              Bəli
             </button>
             <button
               onClick={() => setConfirmReset(false)}
-              className="px-3 py-1.5 rounded-lg text-sm"
+              className="px-4 py-1.5 rounded-lg text-sm font-semibold"
               style={{ border: `1px solid ${T.border}`, color: T.muted }}
             >
-              İmtina
+              Xeyr
             </button>
           </div>
         ) : (
@@ -1828,17 +1833,47 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
                     >
                       {qty}
                     </span>
-                    <input
-                      type="number"
-                      min="1"
-                      placeholder="1"
-                      value={amounts[it.id] || ""}
-                      onChange={(e) => setAmounts((p) => ({ ...p, [it.id]: e.target.value }))}
-                      className="w-12 px-1 py-1.5 rounded-lg text-center text-sm"
-                      style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
-                    />
-                    <IconBtn onClick={() => apply(it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
-                    <IconBtn onClick={() => apply(it.id, 1)}><Plus size={14} color={T.free} /></IconBtn>
+                    {confirmDeleteItem === it.id ? (
+                      <span className="flex items-center gap-1">
+                        <span style={{ color: T.muted, fontSize: 12 }}>Silinsin?</span>
+                        <button
+                          onClick={() => deleteItem(it.id)}
+                          className="px-2.5 py-1 rounded-lg text-xs font-semibold"
+                          style={{ background: T.danger, color: "#1A0A0F" }}
+                        >
+                          Bəli
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteItem(null)}
+                          className="px-2.5 py-1 rounded-lg text-xs font-semibold"
+                          style={{ border: `1px solid ${T.border}`, color: T.muted }}
+                        >
+                          Xeyr
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        <input
+                          type="number"
+                          min="1"
+                          placeholder="1"
+                          value={amounts[it.id] || ""}
+                          onChange={(e) => setAmounts((p) => ({ ...p, [it.id]: e.target.value }))}
+                          className="w-12 px-1 py-1.5 rounded-lg text-center text-sm"
+                          style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                        />
+                        <IconBtn onClick={() => apply(it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
+                        <IconBtn onClick={() => apply(it.id, 1)}><Plus size={14} color={T.free} /></IconBtn>
+                        <button
+                          onClick={() => setConfirmDeleteItem(it.id)}
+                          title="Məhsulu sil"
+                          className="p-1 rounded shrink-0"
+                          style={{ color: T.muted }}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 );
               })
