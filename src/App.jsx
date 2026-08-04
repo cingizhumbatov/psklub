@@ -534,22 +534,6 @@ export default function App() {
     showToast(`Stok satışı əlavə edildi — ${money(stockTotal)}`, false);
   }
 
-  // Səhvən başladılmış sessiyanı ləğv et — satış yazılmır, sifariş edilmiş stok anbara qaytarılır
-  function cancelSession(id) {
-    const cabin = active[id];
-    if (!cabin) return;
-    const nextWarehouse = { ...warehouse };
-    cabin.orders.forEach((o) => {
-      nextWarehouse[o.item] = round2((nextWarehouse[o.item] || 0) + o.qty);
-    });
-    if (cabin.orders.length > 0) persistWarehouse(nextWarehouse);
-    const next = { ...active };
-    delete next[id];
-    persistActive(next);
-    setModalCabin(null);
-    showToast(`${cabinLabel(settings, id)} sessiyası ləğv edildi`, false);
-  }
-
   // Aktiv sessiyaya vaxt əlavə et — bitmə vaxtı irəli çəkilir, bildiriş yenidən aktivləşir
   function extendSession(id, minutes) {
     const cabin = active[id];
@@ -774,7 +758,6 @@ export default function App() {
               onChangeOrder={changeOrder}
               onCheckout={checkoutCabin}
               onTransfer={transferCabin}
-              onCancelSession={cancelSession}
               onExtend={extendSession}
               onClose={() => setModalCabin(null)}
             />
@@ -1122,9 +1105,8 @@ function StartCabinModal({ id, settings, onPick, onClose }) {
 }
 
 // ---------- CABIN MODAL ----------
-function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onCancelSession, onExtend, onClose }) {
+function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onExtend, onClose }) {
   const [transferTarget, setTransferTarget] = useState("");
-  const [confirmCancel, setConfirmCancel] = useState(false);
   const rate = settings.cabinRates?.[id] ?? 1.5;
   const elapsed = segElapsed(cabin, now);
   const cost = segCost(cabin, now, settings.cabinRates);
@@ -1283,40 +1265,6 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
       >
         Sessiyanı bağla və hesabla
       </button>
-
-      <div style={{ borderTop: `1px solid ${T.border}` }} className="mt-4 pt-3">
-        {!confirmCancel ? (
-          <button
-            onClick={() => setConfirmCancel(true)}
-            className="w-full py-2.5 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold"
-            style={{ border: `1px solid ${T.danger}`, color: T.danger }}
-          >
-            <Trash2 size={14} /> Sessiyanı ləğv et (səhvən başladılıb)
-          </button>
-        ) : (
-          <>
-            <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">
-              Sessiya silinəcək, satış qeydə alınmayacaq. Kabinetə əlavə edilmiş stok anbara geri qaytarılacaq.
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => onCancelSession(id)}
-                className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
-                style={{ background: T.danger, color: "#1A0A0F" }}
-              >
-                Bəli, ləğv et
-              </button>
-              <button
-                onClick={() => setConfirmCancel(false)}
-                className="flex-1 py-2.5 rounded-xl text-sm"
-                style={{ border: `1px solid ${T.border}`, color: T.muted }}
-              >
-                İmtina
-              </button>
-            </div>
-          </>
-        )}
-      </div>
     </Modal>
   );
 }
