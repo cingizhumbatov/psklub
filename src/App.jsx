@@ -207,16 +207,24 @@ export default function App() {
       return false;
     }
   });
+  // Menyu app-dən (giriş düyməsindən) açılıbmı? QR ilə açılanda geri düyməsi olmasın.
+  const [menuFromApp, setMenuFromApp] = useState(false);
   useEffect(() => {
-    const onHash = () => setShowMenu((window.location.hash || "").replace("#", "") === "menu");
+    const onHash = () => {
+      const isMenu = (window.location.hash || "").replace("#", "") === "menu";
+      setShowMenu(isMenu);
+      if (!isMenu) setMenuFromApp(false);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   function openMenu() {
+    setMenuFromApp(true);
     window.location.hash = "menu";
     setShowMenu(true);
   }
   function closeMenu() {
+    setMenuFromApp(false);
     if (window.location.hash) window.location.hash = "";
     setShowMenu(false);
   }
@@ -759,7 +767,7 @@ export default function App() {
       `}</style>
 
       {showMenu ? (
-        <PublicMenu onBack={closeMenu} />
+        <PublicMenu onBack={menuFromApp ? closeMenu : undefined} />
       ) : loading ? (
         <div style={{ color: T.muted }} className="text-center py-20">Yüklənir…</div>
       ) : !role ? (
