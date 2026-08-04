@@ -3,7 +3,7 @@ import {
   Gamepad2, CupSoda, Cookie, BarChart3, Settings2, Plus, Minus, X, Power,
   ShoppingCart, RotateCcw, AlertTriangle, Package, PackagePlus, CheckCircle2, PlayCircle,
   Lock, LogOut, ShieldCheck, User, KeyRound, Trash2, AlarmClock, Timer, Gift,
-  Infinity as InfinityIcon,
+  Infinity as InfinityIcon, ChevronDown, ChevronRight,
 } from "lucide-react";
 
 // Kabinet başlatma vaxt paketləri
@@ -1107,6 +1107,8 @@ function StartCabinModal({ id, settings, onPick, onClose }) {
 // ---------- CABIN MODAL ----------
 function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onChangeOrder, onCheckout, onTransfer, onExtend, onClose }) {
   const [transferTarget, setTransferTarget] = useState("");
+  const [openCats, setOpenCats] = useState({});
+  const toggleCat = (catId) => setOpenCats((p) => ({ ...p, [catId]: !p[catId] }));
   const rate = settings.cabinRates?.[id] ?? 1.5;
   const elapsed = segElapsed(cabin, now);
   const cost = segCost(cabin, now, settings.cabinRates);
@@ -1191,37 +1193,57 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
       )}
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Stok əlavə et</div>
-      <div className="flex flex-col gap-3 mb-4">
-        {itemsByCategory(settings.menu).map(({ cat, items }) =>
-          items.length === 0 ? null : (
-            <div key={cat.id}>
-              <div style={{ color: T.muted, fontSize: 11, fontWeight: 600, letterSpacing: 0.4 }} className="mb-1.5 uppercase">
-                {cat.name}
-              </div>
-              <div className="flex flex-col gap-2">
-                {items.map((it) => {
-                  const order = cabin.orders.find((o) => o.item === it.id);
-                  const qty = order ? order.qty : 0;
-                  return (
-                    <div key={it.id} className="flex items-center justify-between rounded-xl p-2.5" style={{ background: T.panel2 }}>
-                      <div className="flex items-center gap-2">
-                        <span style={{ fontSize: 14 }}>{it.name}</span>
-                        <span style={{ color: T.muted, fontSize: 12 }}>
-                          ({money(it.price)} · qalıq: {warehouse[it.id] || 0})
-                        </span>
+      <div className="flex flex-col gap-2 mb-4">
+        {itemsByCategory(settings.menu).map(({ cat, items }) => {
+          if (items.length === 0) return null;
+          const open = openCats[cat.id];
+          const catQty = items.reduce((s, it) => {
+            const o = cabin.orders.find((o) => o.item === it.id);
+            return s + (o ? o.qty : 0);
+          }, 0);
+          const Icon = categoryIcon(cat.id);
+          return (
+            <div key={cat.id} className="rounded-xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+              <button
+                onClick={() => toggleCat(cat.id)}
+                className="w-full flex items-center justify-between px-3 py-2.5"
+                style={{ background: T.panel2 }}
+              >
+                <span className="flex items-center gap-2">
+                  {open ? <ChevronDown size={16} color={T.muted} /> : <ChevronRight size={16} color={T.muted} />}
+                  <Icon size={15} color={T.muted} />
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{cat.name}</span>
+                </span>
+                {catQty > 0 && (
+                  <span style={{ fontFamily: FONT_MONO, fontSize: 12, color: T.free, fontWeight: 600 }}>{catQty} ədəd</span>
+                )}
+              </button>
+              {open && (
+                <div className="flex flex-col gap-2 p-2">
+                  {items.map((it) => {
+                    const order = cabin.orders.find((o) => o.item === it.id);
+                    const qty = order ? order.qty : 0;
+                    return (
+                      <div key={it.id} className="flex items-center justify-between rounded-xl p-2.5" style={{ background: T.panel }}>
+                        <div className="flex items-center gap-2">
+                          <span style={{ fontSize: 14 }}>{it.name}</span>
+                          <span style={{ color: T.muted, fontSize: 12 }}>
+                            ({money(it.price)} · qalıq: {warehouse[it.id] || 0})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <IconBtn onClick={() => onChangeOrder(id, it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
+                          <span style={{ fontFamily: FONT_MONO, minWidth: 18, textAlign: "center" }}>{qty}</span>
+                          <IconBtn onClick={() => onChangeOrder(id, it.id, 1)} disabled={(warehouse[it.id] || 0) <= 0}><Plus size={14} /></IconBtn>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <IconBtn onClick={() => onChangeOrder(id, it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
-                        <span style={{ fontFamily: FONT_MONO, minWidth: 18, textAlign: "center" }}>{qty}</span>
-                        <IconBtn onClick={() => onChangeOrder(id, it.id, 1)} disabled={(warehouse[it.id] || 0) <= 0}><Plus size={14} /></IconBtn>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          )
-        )}
+          );
+        })}
       </div>
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Kabinet dəyiş</div>
