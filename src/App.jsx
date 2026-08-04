@@ -1038,6 +1038,17 @@ function Dashboard({ active, now, settings, warehouse, activeCount, todayRevenue
                       <InfinityIcon size={12} /> Limitsiz
                     </div>
                   )}
+                  {cabin.orders.length > 0 && (
+                    <div
+                      className="flex items-start gap-1 rounded-lg px-1.5 py-1"
+                      style={{ background: T.panel2, fontSize: 11, lineHeight: 1.35 }}
+                    >
+                      <ShoppingCart size={11} color={T.muted} style={{ marginTop: 2, flexShrink: 0 }} />
+                      <span style={{ color: T.text }}>
+                        {cabin.orders.map((o) => `${menuItemLabel(settings.menu, o.item)}×${o.qty}`).join(", ")}
+                      </span>
+                    </div>
+                  )}
                   <div style={{ fontFamily: FONT_MONO, fontSize: 13 }} className="mb-1">{money(cost + stockTotal)}</div>
                 </>
               ) : (
@@ -1235,21 +1246,19 @@ function CabinModal({ id, cabin, now, settings, warehouse, activeSessions, onCha
                 )}
               </button>
               {open && (
-                <div className="flex flex-col gap-2 p-2">
+                <div className="grid grid-cols-2 gap-2 p-2">
                   {items.map((it) => {
                     const order = cabin.orders.find((o) => o.item === it.id);
                     const qty = order ? order.qty : 0;
                     return (
-                      <div key={it.id} className="flex items-center justify-between rounded-xl p-2.5" style={{ background: T.panel }}>
-                        <div className="flex items-center gap-2">
-                          <span style={{ fontSize: 14 }}>{it.name}</span>
-                          <span style={{ color: T.muted, fontSize: 12 }}>
-                            ({money(it.price)} · qalıq: {warehouse[it.id] || 0})
-                          </span>
+                      <div key={it.id} className="rounded-xl p-2 flex flex-col gap-1.5" style={{ background: T.panel, border: qty > 0 ? `1px solid ${T.free}` : `1px solid ${T.border}` }}>
+                        <div style={{ fontSize: 13, fontWeight: 500 }} className="truncate">{it.name}</div>
+                        <div style={{ color: T.muted, fontSize: 11 }}>
+                          {money(it.price)} · qalıq: {warehouse[it.id] || 0}
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-between gap-1">
                           <IconBtn onClick={() => onChangeOrder(id, it.id, -1)} disabled={qty === 0}><Minus size={14} /></IconBtn>
-                          <span style={{ fontFamily: FONT_MONO, minWidth: 18, textAlign: "center" }}>{qty}</span>
+                          <span style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 600, minWidth: 18, textAlign: "center" }}>{qty}</span>
                           <IconBtn onClick={() => onChangeOrder(id, it.id, 1)} disabled={(warehouse[it.id] || 0) <= 0}><Plus size={14} /></IconBtn>
                         </div>
                       </div>
