@@ -328,25 +328,21 @@ export default function App() {
     } catch {}
   }
 
-  async function persistActive(next) {
-    markWrite();
-    setActive(next);
-    const ok = await safeSet("active-sessions", next);
-    if (!ok) showToast("Sessiya yadda saxlanmadı", true);
-  }
-
   // Paket vaxtı bitəndə bir dəfə bildiriş (toast + səs), kartda "Vaxt bitdi" işarəsi qalır
   useEffect(() => {
     const due = Object.entries(active).filter(
       ([, c]) => c.plannedEndTime && !c.notified && now >= c.plannedEndTime
     );
     if (due.length === 0) return;
-    const next = { ...active };
-    due.forEach(([cid, c]) => {
-      next[cid] = { ...c, notified: true };
-      showToast(`⏰ ${cabinLabel(settings, Number(cid))} — vaxt bitdi!`, true);
+    const dueIds = due.map(([cid]) => cid);
+    mutateActive((cur) => {
+      const next = { ...cur };
+      dueIds.forEach((cid) => {
+        if (next[cid]) next[cid] = { ...next[cid], notified: true };
+      });
+      return next;
     });
-    persistActive(next);
+    dueIds.forEach((cid) => showToast(`⏰ ${cabinLabel(settings, Number(cid))} — vaxt bitdi!`, true));
     beep();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now, active, settings]);
@@ -415,14 +411,43 @@ export default function App() {
     if (!ok) showToast("Anbar qalığı saxlanmadı", true);
   }
 
+  // Toqquşmasız yazma: backend-dən ƏN SON aktiv sessiyaları oxu, yalnız öz dəyişikliyini birləşdir.
+  // Bu, başqa cihazın dəyişikliyinin (məs. bağlanmış kabinetin) üstələnməsinin qarşısını alır.
+  async function mutateActive(mutator) {
+    markWrite();
+    const latest = (await safeGet("active-sessions")) || {};
+    const cur = {};
+    Object.entries(latest).forEach(([cid, cab]) => {
+      cur[cid] = normalizeCabin(cab, Number(cid));
+    });
+    const next = mutator(cur);
+    setActive(next);
+    const ok = await safeSet("active-sessions", next);
+    if (!ok) showToast("Sessiya yadda saxlanmadı", true);
+    return next;
+  }
+  // Anbar üçün eyni: ən son qalığı oxu, dəyişikliyi birləşdir
+  async function mutateWarehouse(mutator) {
+    markWrite();
+    const cur = (await safeGet("warehouse")) || {};
+    const next = mutator(cur);
+    setWarehouse(next);
+    const ok = await safeSet("warehouse", next);
+    if (!ok) showToast("Anbar qalığı saxlanmadı", true);
+    return next;
+  }
+
   // Anbar qalığını artır (+) və ya azalt (−). Qalıq 0-dan aşağı düşmür.
   async function adjustStock(item, delta) {
     if (!delta) return;
-    const current = warehouse[item] || 0;
+    markWrite();
+    const cur = (await safeGet("warehouse")) || {};
+    const current = cur[item] || 0;
     const nextQty = round2(Math.max(0, current + delta));
     const applied = round2(nextQty - current);
     if (applied === 0) return;
-    persistWarehouse({ ...warehouse, [item]: nextQty });
+    setWarehouse({ ...cur, [item]: nextQty });
+    await safeSet("warehouse", { ...cur, [item]: nextQty });
     const record = { id: `in-${Date.now()}`, item, qty: applied, timestamp: Date.now(), businessDay };
     const nextIntakes = [record, ...intakes].slice(0, 80);
     setIntakes(nextIntakes);
@@ -462,33 +487,34 @@ export default function App() {
     const free = plan?.free === true;
     const planMinutes = plan?.minutes ?? null;
     const plannedEndTime = planMinutes ? startTime + planMinutes * 60000 : null;
-    const next = {
-      ...active,
-      [id]: {
-        segments: [{ cabinId: id, startTime, endTime: null }],
-        orders: [],
-        free,
-        planMinutes,
-        plannedEndTime,
-        notified: false,
-      },
+    const session = {
+      segments: [{ cabinId: id, startTime, endTime: null }],
+      orders: [],
+      free,
+      planMinutes,
+      plannedEndTime,
+      notified: false,
     };
-    persistActive(next);
+    // Ən son vəziyyəti yoxla — kabinet artıq başlıdırsa, üstünə yazma
+    mutateActive((cur) => (cur[id] ? cur : { ...cur, [id]: session }));
     setStartCabinId(null);
     setModalCabin(id);
   }
 
   function transferCabin(fromId, toId) {
-    const cabin = active[fromId];
-    if (!cabin || active[toId] || fromId === toId) return;
+    if (!active[fromId] || active[toId] || fromId === toId) return;
     const now = Date.now();
-    const segments = [...cabin.segments];
-    segments[segments.length - 1] = { ...segments[segments.length - 1], endTime: now };
-    segments.push({ cabinId: toId, startTime: now, endTime: null });
-    const next = { ...active };
-    delete next[fromId];
-    next[toId] = { ...cabin, segments };
-    persistActive(next);
+    mutateActive((cur) => {
+      const cabin = cur[fromId];
+      if (!cabin || cur[toId]) return cur; // ən son vəziyyətdə yoxla
+      const segments = [...cabin.segments];
+      segments[segments.length - 1] = { ...segments[segments.length - 1], endTime: now };
+      segments.push({ cabinId: toId, startTime: now, endTime: null });
+      const next = { ...cur };
+      delete next[fromId];
+      next[toId] = { ...cabin, segments };
+      return next;
+    });
     setModalCabin(toId);
     showToast(`${cabinLabel(settings, fromId)} → ${cabinLabel(settings, toId)} transfer edildi`, false);
   }
@@ -500,24 +526,34 @@ export default function App() {
       showToast("Anbarda bu məhsul qalmayıb", true);
       return;
     }
-    const orders = [...cabin.orders];
-    const idx = orders.findIndex((o) => o.item === itemKey);
-    if (idx === -1 && delta > 0) {
-      const price = findMenuItem(settings.menu, itemKey)?.price ?? 0;
-      orders.push({ item: itemKey, qty: 1, unitPrice: price });
-    } else if (idx !== -1) {
-      const newQty = orders[idx].qty + delta;
-      if (newQty <= 0) orders.splice(idx, 1);
-      else orders[idx] = { ...orders[idx], qty: newQty };
-    }
-    persistActive({ ...active, [id]: { ...cabin, orders } });
-    persistWarehouse({ ...warehouse, [itemKey]: round2((warehouse[itemKey] || 0) - delta) });
+    const price = findMenuItem(settings.menu, itemKey)?.price ?? 0;
+    mutateActive((cur) => {
+      const c = cur[id];
+      if (!c) return cur;
+      const orders = [...c.orders];
+      const idx = orders.findIndex((o) => o.item === itemKey);
+      if (idx === -1 && delta > 0) {
+        orders.push({ item: itemKey, qty: 1, unitPrice: price });
+      } else if (idx !== -1) {
+        const newQty = orders[idx].qty + delta;
+        if (newQty <= 0) orders.splice(idx, 1);
+        else orders[idx] = { ...orders[idx], qty: newQty };
+      }
+      return { ...cur, [id]: { ...c, orders } };
+    });
+    mutateWarehouse((cur) => ({ ...cur, [itemKey]: round2(Math.max(0, (cur[itemKey] || 0) - delta)) }));
   }
 
   async function checkoutCabin(id) {
-    const cabin = active[id];
-    if (!cabin) return;
     const endTime = Date.now();
+    // Ən son sessiya məlumatını backend-dən götür (başqa cihazda sifariş dəyişmiş ola bilər)
+    const latest = (await safeGet("active-sessions")) || {};
+    const raw = latest[id];
+    if (!raw) {
+      setModalCabin(null);
+      return;
+    }
+    const cabin = normalizeCabin(raw, Number(id));
     const cabinCost = round2(segCost(cabin, endTime, settings.cabinRates));
     const minutes = segElapsed(cabin, endTime) / 60000;
     const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
@@ -536,22 +572,29 @@ export default function App() {
       segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? endTime })),
     };
     await appendSale(record);
-    const next = { ...active };
-    delete next[id];
-    persistActive(next);
+    await mutateActive((cur) => {
+      const next = { ...cur };
+      delete next[id];
+      return next;
+    });
     setModalCabin(null);
     showToast(`${cabinLabel(settings, id)} bağlandı — ${money(grandTotal)}`, false);
   }
 
   async function closeDay(closeTimeMs) {
     markWrite();
-    const ids = Object.keys(active).map(Number);
+    // Bütün cihazlardakı aktiv kabinetləri hesablamaq üçün ən son vəziyyəti oxu
+    const latestActive = (await safeGet("active-sessions")) || {};
+    const activeNow = {};
+    Object.entries(latestActive).forEach(([cid, cab]) => {
+      activeNow[cid] = normalizeCabin(cab, Number(cid));
+    });
+    const ids = Object.keys(activeNow).map(Number);
     const dayKey = `sales:${businessDay}`;
     let merged = (await safeGet(dayKey)) || [];
     if (ids.length > 0) {
-      const nextActive = { ...active };
       for (const id of ids) {
-        const cabin = active[id];
+        const cabin = activeNow[id];
         const cabinCost = round2(segCost(cabin, closeTimeMs, settings.cabinRates));
         const minutes = segElapsed(cabin, closeTimeMs) / 60000;
         const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
@@ -572,10 +615,10 @@ export default function App() {
             segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? closeTimeMs })),
           },
         ];
-        delete nextActive[id];
       }
       await safeSet(dayKey, merged);
-      persistActive(nextActive);
+      setActive({});
+      await safeSet("active-sessions", {});
     }
     await safeSet("day-open", false);
     setDayOpen(false);
@@ -599,13 +642,17 @@ export default function App() {
 
     const entries = Object.entries(stockAdditions || {}).filter(([, q]) => q > 0);
     if (entries.length > 0) {
-      const nextWarehouse = { ...warehouse };
       const newIntakes = [];
       entries.forEach(([itemId, qty]) => {
-        nextWarehouse[itemId] = round2((nextWarehouse[itemId] || 0) + qty);
         newIntakes.push({ id: `in-${Date.now()}-${itemId}`, item: itemId, qty, timestamp: Date.now(), businessDay: bd });
       });
-      persistWarehouse(nextWarehouse);
+      await mutateWarehouse((cur) => {
+        const nw = { ...cur };
+        entries.forEach(([itemId, qty]) => {
+          nw[itemId] = round2((nw[itemId] || 0) + qty);
+        });
+        return nw;
+      });
       const mergedIntakes = [...newIntakes, ...intakes].slice(0, 80);
       setIntakes(mergedIntakes);
       await safeSet("stock-intakes", mergedIntakes);
@@ -636,23 +683,29 @@ export default function App() {
       endTime: Date.now(),
     };
     await appendSale(record);
-    const nextWarehouse = { ...warehouse };
-    orders.forEach((o) => {
-      nextWarehouse[o.item] = round2((nextWarehouse[o.item] || 0) - o.qty);
+    await mutateWarehouse((cur) => {
+      const nw = { ...cur };
+      orders.forEach((o) => {
+        nw[o.item] = round2(Math.max(0, (nw[o.item] || 0) - o.qty));
+      });
+      return nw;
     });
-    persistWarehouse(nextWarehouse);
     setStockModalOpen(false);
     showToast(`Stok satışı əlavə edildi — ${money(stockTotal)}`, false);
   }
 
   // Aktiv sessiyaya vaxt əlavə et — bitmə vaxtı irəli çəkilir, bildiriş yenidən aktivləşir
   function extendSession(id, minutes) {
-    const cabin = active[id];
-    if (!cabin || !minutes) return;
-    const base = Math.max(now, cabin.plannedEndTime || now);
-    const plannedEndTime = base + minutes * 60000;
-    const planMinutes = (cabin.planMinutes || 0) + minutes;
-    persistActive({ ...active, [id]: { ...cabin, plannedEndTime, planMinutes, notified: false } });
+    if (!active[id] || !minutes) return;
+    mutateActive((cur) => {
+      const cabin = cur[id];
+      if (!cabin) return cur;
+      const base = Math.max(Date.now(), cabin.plannedEndTime || Date.now());
+      return {
+        ...cur,
+        [id]: { ...cabin, plannedEndTime: base + minutes * 60000, planMinutes: (cabin.planMinutes || 0) + minutes, notified: false },
+      };
+    });
     showToast(`${cabinLabel(settings, id)} — ${minutes} dəq əlavə edildi`, false);
   }
 
@@ -665,10 +718,10 @@ export default function App() {
       showToast("Silinmədi", true);
       return;
     }
-    persistWarehouse({
-      ...warehouse,
-      [record.item]: round2(Math.max(0, (warehouse[record.item] || 0) - record.qty)),
-    });
+    mutateWarehouse((cur) => ({
+      ...cur,
+      [record.item]: round2(Math.max(0, (cur[record.item] || 0) - record.qty)),
+    }));
     showToast(`Daxilolma silindi — ${record.qty} ədəd ${menuItemLabel(settings.menu, record.item)}`, false);
   }
 
@@ -694,11 +747,13 @@ export default function App() {
     }
     if (date === businessDay) setTodaySales(next);
     if (rec && rec.orders && rec.orders.length > 0) {
-      const nextWarehouse = { ...warehouse };
-      rec.orders.forEach((o) => {
-        nextWarehouse[o.item] = round2((nextWarehouse[o.item] || 0) + o.qty);
+      await mutateWarehouse((cur) => {
+        const nw = { ...cur };
+        rec.orders.forEach((o) => {
+          nw[o.item] = round2((nw[o.item] || 0) + o.qty);
+        });
+        return nw;
       });
-      persistWarehouse(nextWarehouse);
     }
     showToast("Qeyd silindi", false);
     return next;
@@ -736,7 +791,7 @@ export default function App() {
       return list;
     }
     if (date === businessDay) setTodaySales(cleaned);
-    persistWarehouse({ ...warehouse, [itemId]: round2((warehouse[itemId] || 0) + returned) });
+    await mutateWarehouse((cur) => ({ ...cur, [itemId]: round2((cur[itemId] || 0) + returned) }));
     showToast(`${returned} ədəd ${menuItemLabel(settings.menu, itemId)} qaytarıldı — ${money(unitPrice * returned)} çıxıldı`, false);
     return cleaned;
   }
