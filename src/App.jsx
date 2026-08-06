@@ -295,6 +295,15 @@ export default function App() {
   const markWrite = () => {
     lastWriteRef.current = Date.now();
   };
+  // Yazma növbələri — eyni cihazda sürətli əməliyyatlar bir-birini itirməsin (ardıcıl işləsin)
+  const activeQueueRef = useRef(Promise.resolve());
+  const warehouseQueueRef = useRef(Promise.resolve());
+  const seqRef = useRef(0);
+  function enqueue(ref, job) {
+    const run = ref.current.then(job, job);
+    ref.current = run.catch(() => {});
+    return run;
+  }
 
   // Vaxt bitmə bildirişi üçün səs (istifadəçi klik etdikdə hazırlanır)
   const audioRef = useRef(null);
@@ -413,46 +422,56 @@ export default function App() {
 
   // Toqquşmasız yazma: backend-dən ƏN SON aktiv sessiyaları oxu, yalnız öz dəyişikliyini birləşdir.
   // Bu, başqa cihazın dəyişikliyinin (məs. bağlanmış kabinetin) üstələnməsinin qarşısını alır.
-  async function mutateActive(mutator) {
-    markWrite();
-    const latest = (await safeGet("active-sessions")) || {};
-    const cur = {};
-    Object.entries(latest).forEach(([cid, cab]) => {
-      cur[cid] = normalizeCabin(cab, Number(cid));
+  function mutateActive(mutator) {
+    return enqueue(activeQueueRef, async () => {
+      markWrite();
+      const latest = (await safeGet("active-sessions")) || {};
+      const cur = {};
+      Object.entries(latest).forEach(([cid, cab]) => {
+        cur[cid] = normalizeCabin(cab, Number(cid));
+      });
+      const next = mutator(cur);
+      setActive(next);
+      const ok = await safeSet("active-sessions", next);
+      if (!ok) showToast("Sessiya yadda saxlanmadı", true);
+      return next;
     });
-    const next = mutator(cur);
-    setActive(next);
-    const ok = await safeSet("active-sessions", next);
-    if (!ok) showToast("Sessiya yadda saxlanmadı", true);
-    return next;
   }
-  // Anbar üçün eyni: ən son qalığı oxu, dəyişikliyi birləşdir
-  async function mutateWarehouse(mutator) {
-    markWrite();
-    const cur = (await safeGet("warehouse")) || {};
-    const next = mutator(cur);
-    setWarehouse(next);
-    const ok = await safeSet("warehouse", next);
-    if (!ok) showToast("Anbar qalığı saxlanmadı", true);
-    return next;
+  // Anbar üçün eyni: ən son qalığı oxu, dəyişikliyi birləşdir (ardıcıl növbədə)
+  function mutateWarehouse(mutator) {
+    return enqueue(warehouseQueueRef, async () => {
+      markWrite();
+      const cur = (await safeGet("warehouse")) || {};
+      const next = mutator(cur);
+      setWarehouse(next);
+      const ok = await safeSet("warehouse", next);
+      if (!ok) showToast("Anbar qalığı saxlanmadı", true);
+      return next;
+    });
   }
 
   // Anbar qalığını artır (+) və ya azalt (−). Qalıq 0-dan aşağı düşmür.
+  // Anbar + daxilolma tarixçəsi eyni növbədə (ardıcıl) — sürətli kliklərdə itmə olmasın.
   async function adjustStock(item, delta) {
     if (!delta) return;
-    markWrite();
-    const cur = (await safeGet("warehouse")) || {};
-    const current = cur[item] || 0;
-    const nextQty = round2(Math.max(0, current + delta));
-    const applied = round2(nextQty - current);
-    if (applied === 0) return;
-    setWarehouse({ ...cur, [item]: nextQty });
-    await safeSet("warehouse", { ...cur, [item]: nextQty });
-    const record = { id: `in-${Date.now()}`, item, qty: applied, timestamp: Date.now(), businessDay };
-    const nextIntakes = [record, ...intakes].slice(0, 80);
-    setIntakes(nextIntakes);
-    const ok = await safeSet("stock-intakes", nextIntakes);
-    if (!ok) showToast("Tarixçə saxlanmadı", true);
+    const applied = await enqueue(warehouseQueueRef, async () => {
+      markWrite();
+      const cur = (await safeGet("warehouse")) || {};
+      const current = cur[item] || 0;
+      const nextQty = round2(Math.max(0, current + delta));
+      const app = round2(nextQty - current);
+      if (app === 0) return 0;
+      const nw = { ...cur, [item]: nextQty };
+      setWarehouse(nw);
+      await safeSet("warehouse", nw);
+      const record = { id: `in-${Date.now()}-${seqRef.current++}`, item, qty: app, timestamp: Date.now(), businessDay };
+      const freshIntakes = (await safeGet("stock-intakes")) || [];
+      const nextIntakes = [record, ...freshIntakes].slice(0, 80);
+      setIntakes(nextIntakes);
+      await safeSet("stock-intakes", nextIntakes);
+      return app;
+    });
+    if (!applied) return;
     const label = menuItemLabel(settings.menu, item);
     showToast(
       applied > 0 ? `Anbara ${applied} ədəd ${label} əlavə edildi` : `Anbardan ${-applied} ədəd ${label} çıxarıldı`,
