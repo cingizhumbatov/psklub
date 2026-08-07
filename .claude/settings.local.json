@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd \"/c/Users/User/Desktop/pricebase_extract\" && find . -type f -not -path '*/.git/*' | sort)"
+      "Bash(cd \"/c/Users/User/Desktop/pricebase_extract\" && find . -type f -not -path '*/.git/*' | sort)",
+      "Bash(dotnet run *)",
+      "Bash(curl -s -D - \"http://localhost:5100/api/storage/get?key=day-open\" -o /dev/null)",
+      "Bash(curl -s -X POST http://localhost:5100/api/storage/set -H \"Content-Type: application/json\" -d '{\"key\":\"day-open\",\"value\":\"true\"}')",
+      "Bash(curl -s -X POST http://localhost:5100/api/storage/set -H \"Content-Type: application/json\" -d '{\"key\":\"active-sessions\",\"value\":\"{}\"}')",
+      "Bash(curl -s -X POST http://localhost:5100/api/storage/set -H \"Content-Type: application/json\" -d '{\"key\":\"warehouse\",\"value\":\"{\\\\\"cola\\\\\":20}\"}')"
     ]
   }
 }

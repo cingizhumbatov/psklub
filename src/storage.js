@@ -6,7 +6,9 @@ const API = import.meta.env.VITE_API_URL ?? "http://localhost:5100";
 
 const storage = {
   async get(key) {
-    const res = await fetch(`${API}/api/storage/get?key=${encodeURIComponent(key)}`);
+    // cache: "no-store" — brauzer köhnə (keşlənmiş) dəyər qaytarmasın,
+    // əks halda bağlanmış kabinet/köhnə stok geri qayıda bilər.
+    const res = await fetch(`${API}/api/storage/get?key=${encodeURIComponent(key)}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`storage.get failed: ${res.status}`);
     const data = await res.json();
     if (data == null) return null;
@@ -31,7 +33,7 @@ const storage = {
     return true;
   },
   async list(prefix) {
-    const res = await fetch(`${API}/api/storage/list?prefix=${encodeURIComponent(prefix || "")}`);
+    const res = await fetch(`${API}/api/storage/list?prefix=${encodeURIComponent(prefix || "")}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`storage.list failed: ${res.status}`);
     const data = await res.json();
     return { keys: data.keys || [] };

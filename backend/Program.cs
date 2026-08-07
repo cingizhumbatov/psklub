@@ -13,6 +13,17 @@ var app = builder.Build();
 
 app.UseCors();
 
+// API cavabları keşlənməsin (köhnə açar-dəyər qaytarılmasın)
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api"))
+    {
+        ctx.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+        ctx.Response.Headers["Pragma"] = "no-cache";
+    }
+    await next();
+});
+
 // Frontend (build olunmuş statik fayllar wwwroot-dan) verilir
 app.UseDefaultFiles();
 app.UseStaticFiles();
