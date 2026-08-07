@@ -35,10 +35,25 @@ Directory.CreateDirectory(dbDir);
 var dbPath = Path.Combine(dbDir, "psklub.db");
 var connectionString = $"Data Source={dbPath}";
 
-using (var conn = new SqliteConnection(connectionString))
+// Hər açılan bağlantıda kilid gözləmə vaxtı — çox cihazlı yazmalarda "database is locked" olmasın
+SqliteConnection OpenConnection()
 {
-    conn.Open();
+    var c = new SqliteConnection(connectionString);
+    c.Open();
+    using (var pragma = c.CreateCommand())
+    {
+        pragma.CommandText = "PRAGMA busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
+    }
+    return c;
+}
+
+using (var conn = OpenConnection())
+{
     using var cmd = conn.CreateCommand();
+    // WAL — eyni anda oxu+yaz üçün daha yaxşı konkurentlik (bir dəfə DB faylına yazılır)
+    cmd.CommandText = "PRAGMA journal_mode=WAL;";
+    cmd.ExecuteNonQuery();
     cmd.CommandText = @"CREATE TABLE IF NOT EXISTS Store (
         Key   TEXT PRIMARY KEY,
         Value TEXT NOT NULL
@@ -51,14 +66,20 @@ using (var conn = new SqliteConnection(connectionString))
 // GET /api/storage/get?key=...  ->  { value } | null
 app.MapGet("/api/storage/get", (string key) =>
 {
-    using var conn = new SqliteConnection(connectionString);
-    conn.Open();
-    using var cmd = conn.CreateCommand();
-    cmd.CommandText = "SELECT Value FROM Store WHERE Key = $key";
-    cmd.Parameters.AddWithValue("$key", key);
-    var result = cmd.ExecuteScalar();
-    if (result is null) return Results.Json<object?>(null);
-    return Results.Json(new { value = (string)result });
+    try
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Value FROM Store WHERE Key = $key";
+        cmd.Parameters.AddWithValue("$key", key);
+        var result = cmd.ExecuteScalar();
+        if (result is null) return Results.Json<object?>(null);
+        return Results.Json(new { value = (string)result });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { error = ex.Message }, statusCode: 500);
+    }
 });
 
 // POST /api/storage/set  { key, value }  ->  { ok: true }
@@ -66,16 +87,21 @@ app.MapPost("/api/storage/set", (StoreEntry entry) =>
 {
     if (entry is null || entry.Key is null || entry.Value is null)
         return Results.BadRequest(new { ok = false });
-
-    using var conn = new SqliteConnection(connectionString);
-    conn.Open();
-    using var cmd = conn.CreateCommand();
-    cmd.CommandText = @"INSERT INTO Store (Key, Value) VALUES ($key, $value)
-        ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value";
-    cmd.Parameters.AddWithValue("$key", entry.Key);
-    cmd.Parameters.AddWithValue("$value", entry.Value);
-    cmd.ExecuteNonQuery();
-    return Results.Json(new { ok = true });
+    try
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO Store (Key, Value) VALUES ($key, $value)
+            ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value";
+        cmd.Parameters.AddWithValue("$key", entry.Key);
+        cmd.Parameters.AddWithValue("$value", entry.Value);
+        cmd.ExecuteNonQuery();
+        return Results.Json(new { ok = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 500);
+    }
 });
 
 // POST /api/storage/delete  { key }  ->  { ok: true }
@@ -83,36 +109,47 @@ app.MapPost("/api/storage/delete", (KeyOnly body) =>
 {
     if (body is null || body.Key is null)
         return Results.BadRequest(new { ok = false });
-
-    using var conn = new SqliteConnection(connectionString);
-    conn.Open();
-    using var cmd = conn.CreateCommand();
-    cmd.CommandText = "DELETE FROM Store WHERE Key = $key";
-    cmd.Parameters.AddWithValue("$key", body.Key);
-    cmd.ExecuteNonQuery();
-    return Results.Json(new { ok = true });
+    try
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM Store WHERE Key = $key";
+        cmd.Parameters.AddWithValue("$key", body.Key);
+        cmd.ExecuteNonQuery();
+        return Results.Json(new { ok = true });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new { ok = false, error = ex.Message }, statusCode: 500);
+    }
 });
 
 // GET /api/storage/list?prefix=...  ->  { keys: [...] }
 app.MapGet("/api/storage/list", (string? prefix) =>
 {
-    using var conn = new SqliteConnection(connectionString);
-    conn.Open();
-    using var cmd = conn.CreateCommand();
-    if (string.IsNullOrEmpty(prefix))
+    try
     {
-        cmd.CommandText = "SELECT Key FROM Store ORDER BY Key";
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        if (string.IsNullOrEmpty(prefix))
+        {
+            cmd.CommandText = "SELECT Key FROM Store ORDER BY Key";
+        }
+        else
+        {
+            cmd.CommandText = "SELECT Key FROM Store WHERE Key LIKE $p ESCAPE '\\' ORDER BY Key";
+            var escaped = prefix.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+            cmd.Parameters.AddWithValue("$p", escaped + "%");
+        }
+        var keys = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) keys.Add(reader.GetString(0));
+        return Results.Json(new { keys });
     }
-    else
+    catch (Exception ex)
     {
-        cmd.CommandText = "SELECT Key FROM Store WHERE Key LIKE $p ESCAPE '\\' ORDER BY Key";
-        var escaped = prefix.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-        cmd.Parameters.AddWithValue("$p", escaped + "%");
+        return Results.Json(new { error = ex.Message }, statusCode: 500);
     }
-    var keys = new List<string>();
-    using var reader = cmd.ExecuteReader();
-    while (reader.Read()) keys.Add(reader.GetString(0));
-    return Results.Json(new { keys });
 });
 
 // SPA fallback — API-yə aid olmayan yollar üçün index.html

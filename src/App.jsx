@@ -298,15 +298,30 @@ export default function App() {
   // Yazma növbələri — eyni cihazda sürətli əməliyyatlar bir-birini itirməsin (ardıcıl işləsin)
   const activeQueueRef = useRef(Promise.resolve());
   const warehouseQueueRef = useRef(Promise.resolve());
+  const salesQueueRef = useRef(Promise.resolve());
   const seqRef = useRef(0);
   function enqueue(ref, job) {
     const run = ref.current.then(job, job);
     ref.current = run.catch(() => {});
     return run;
   }
+  // Satış siyahısını toqquşmasız dəyiş: ən son sales:date oxu, birləşdir, yaz (növbədə)
+  function mutateSales(date, mutator) {
+    return enqueue(salesQueueRef, async () => {
+      markWrite();
+      const key = `sales:${date}`;
+      const list = (await safeGet(key)) || [];
+      const next = mutator(list);
+      const ok = await safeSet(key, next);
+      if (!ok) showToast("Satış siyahısı saxlanmadı", true);
+      if (date === businessDayRef.current) setTodaySales(next);
+      return next;
+    });
+  }
 
   // Vaxt bitmə bildirişi üçün səs (istifadəçi klik etdikdə hazırlanır)
   const audioRef = useRef(null);
+  const notifiedLocalRef = useRef(new Set()); // eyni sessiya üçün təkrar bildiriş olmasın
   function primeAudio() {
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -339,10 +354,17 @@ export default function App() {
 
   // Paket vaxtı bitəndə bir dəfə bildiriş (toast + səs), kartda "Vaxt bitdi" işarəsi qalır
   useEffect(() => {
-    const due = Object.entries(active).filter(
-      ([, c]) => c.plannedEndTime && !c.notified && now >= c.plannedEndTime
-    );
+    // Köhnə sessiyaların açarlarını təmizlə (kabinet id + başlama vaxtı ilə unikal)
+    const validKeys = new Set(Object.entries(active).map(([cid, c]) => `${cid}-${c.segments?.[0]?.startTime}`));
+    for (const k of [...notifiedLocalRef.current]) if (!validKeys.has(k)) notifiedLocalRef.current.delete(k);
+
+    const due = Object.entries(active).filter(([cid, c]) => {
+      if (!(c.plannedEndTime && !c.notified && now >= c.plannedEndTime)) return false;
+      const key = `${cid}-${c.segments?.[0]?.startTime}`;
+      return !notifiedLocalRef.current.has(key); // eyni sessiya üçün təkrar səs/toast olmasın
+    });
     if (due.length === 0) return;
+    due.forEach(([cid, c]) => notifiedLocalRef.current.add(`${cid}-${c.segments?.[0]?.startTime}`));
     const dueIds = due.map(([cid]) => cid);
     mutateActive((cur) => {
       const next = { ...cur };
@@ -404,13 +426,7 @@ export default function App() {
   }
 
   async function appendSale(record) {
-    markWrite();
-    const key = `sales:${businessDay}`;
-    const existing = (await safeGet(key)) || [];
-    const next = [...existing, record];
-    const ok = await safeSet(key, next);
-    if (ok) setTodaySales(next);
-    else showToast("Satış qeydə alınmadı", true);
+    await mutateSales(businessDay, (list) => [...list, record]);
   }
 
   async function persistWarehouse(next) {
@@ -485,6 +501,19 @@ export default function App() {
     const next = { ...settings, menu };
     setSettings(next);
     safeSet("settings", next);
+    // Menyudan çıxarılmış məhsulların "yetim" anbar qalığını təmizlə
+    const validIds = new Set(menu.items.map((i) => i.id));
+    mutateWarehouse((cur) => {
+      let changed = false;
+      const nw = { ...cur };
+      Object.keys(nw).forEach((k) => {
+        if (!validIds.has(k)) {
+          delete nw[k];
+          changed = true;
+        }
+      });
+      return changed ? nw : cur;
+    });
   }
 
   // "Başlat" düyməsi paket seçimi modalını açır
@@ -514,18 +543,22 @@ export default function App() {
       plannedEndTime,
       notified: false,
     };
+    // Dərhal göstər (optimistik) — modal açılan kimi sifariş düymələri işləsin
+    setActive((a) => (a[id] ? a : { ...a, [id]: session }));
     // Ən son vəziyyəti yoxla — kabinet artıq başlıdırsa, üstünə yazma
     mutateActive((cur) => (cur[id] ? cur : { ...cur, [id]: session }));
     setStartCabinId(null);
     setModalCabin(id);
   }
 
-  function transferCabin(fromId, toId) {
+  async function transferCabin(fromId, toId) {
     if (!active[fromId] || active[toId] || fromId === toId) return;
     const now = Date.now();
-    mutateActive((cur) => {
+    let ok = false;
+    await mutateActive((cur) => {
       const cabin = cur[fromId];
       if (!cabin || cur[toId]) return cur; // ən son vəziyyətdə yoxla
+      ok = true;
       const segments = [...cabin.segments];
       segments[segments.length - 1] = { ...segments[segments.length - 1], endTime: now };
       segments.push({ cabinId: toId, startTime: now, endTime: null });
@@ -534,33 +567,67 @@ export default function App() {
       next[toId] = { ...cabin, segments };
       return next;
     });
-    setModalCabin(toId);
-    showToast(`${cabinLabel(settings, fromId)} → ${cabinLabel(settings, toId)} transfer edildi`, false);
+    if (ok) {
+      setModalCabin(toId);
+      showToast(`${cabinLabel(settings, fromId)} → ${cabinLabel(settings, toId)} transfer edildi`, false);
+    } else {
+      showToast("Transfer alınmadı — hədəf kabinet məşğuldur", true);
+    }
   }
 
-  function changeOrder(id, itemKey, delta) {
-    const cabin = active[id];
-    if (!cabin) return;
-    if (delta > 0 && (warehouse[itemKey] || 0) <= 0) {
-      showToast("Anbarda bu məhsul qalmayıb", true);
-      return;
-    }
+  // Kabinetə 1 ədəd əlavə/çıx — atomik: stok yalnız mövcud olduqda düşür, sifariş
+  // yalnız stok həqiqətən ehtiyat edildikdə yazılır (satılan həmişə düşənə bərabər).
+  async function changeOrder(id, itemKey, delta) {
+    if (!active[id]) return;
     const price = findMenuItem(settings.menu, itemKey)?.price ?? 0;
-    mutateActive((cur) => {
-      const c = cur[id];
-      if (!c) return cur;
-      const orders = [...c.orders];
-      const idx = orders.findIndex((o) => o.item === itemKey);
-      if (idx === -1 && delta > 0) {
-        orders.push({ item: itemKey, qty: 1, unitPrice: price });
-      } else if (idx !== -1) {
-        const newQty = orders[idx].qty + delta;
-        if (newQty <= 0) orders.splice(idx, 1);
-        else orders[idx] = { ...orders[idx], qty: newQty };
+
+    if (delta > 0) {
+      // 1) Stok ehtiyat et (ən son qalıqdan)
+      let reserved = false;
+      await mutateWarehouse((cur) => {
+        if ((cur[itemKey] || 0) >= 1) {
+          reserved = true;
+          return { ...cur, [itemKey]: round2((cur[itemKey] || 0) - 1) };
+        }
+        return cur;
+      });
+      if (!reserved) {
+        showToast("Anbarda bu məhsul qalmayıb", true);
+        return;
       }
-      return { ...cur, [id]: { ...c, orders } };
-    });
-    mutateWarehouse((cur) => ({ ...cur, [itemKey]: round2(Math.max(0, (cur[itemKey] || 0) - delta)) }));
+      // 2) Sifarişi yaz; kabinet artıq bağlanıbsa, stoku geri qaytar
+      let added = false;
+      await mutateActive((cur) => {
+        const c = cur[id];
+        if (!c) return cur;
+        added = true;
+        const orders = [...c.orders];
+        const idx = orders.findIndex((o) => o.item === itemKey);
+        if (idx === -1) orders.push({ item: itemKey, qty: 1, unitPrice: price });
+        else orders[idx] = { ...orders[idx], qty: orders[idx].qty + 1 };
+        return { ...cur, [id]: { ...c, orders } };
+      });
+      if (!added) {
+        await mutateWarehouse((cur) => ({ ...cur, [itemKey]: round2((cur[itemKey] || 0) + 1) }));
+      }
+    } else {
+      // Sifarişdən 1 çıx; yalnız həqiqətən çıxıldıqda stoku geri qaytar
+      let removed = false;
+      await mutateActive((cur) => {
+        const c = cur[id];
+        if (!c) return cur;
+        const orders = [...c.orders];
+        const idx = orders.findIndex((o) => o.item === itemKey);
+        if (idx === -1) return cur;
+        removed = true;
+        if (orders[idx].qty - 1 <= 0) orders.splice(idx, 1);
+        else orders[idx] = { ...orders[idx], qty: orders[idx].qty - 1 };
+        return { ...cur, [id]: { ...c, orders } };
+      });
+      if (removed) {
+        await mutateWarehouse((cur) => ({ ...cur, [itemKey]: round2((cur[itemKey] || 0) + 1) }));
+      }
+    }
   }
 
   async function checkoutCabin(id) {
@@ -591,12 +658,8 @@ export default function App() {
         grandTotal: grand,
         segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? endTime })),
       };
-      // Satışı ən son siyahıya əlavə et
-      const skey = `sales:${businessDay}`;
-      const existing = (await safeGet(skey)) || [];
-      const nextSales = [...existing, record];
-      await safeSet(skey, nextSales);
-      setTodaySales(nextSales);
+      // Satışı ən son siyahıya əlavə et (satış növbəsində — toqquşmasız)
+      await mutateSales(businessDay, (list) => [...list, record]);
       // Kabineti aktivdən çıxar (ən son vəziyyətdən)
       const nextActive = {};
       Object.entries(latest).forEach(([cid, cab]) => {
@@ -614,7 +677,7 @@ export default function App() {
   async function closeDay(closeTimeMs) {
     setCloseDayOpen(false);
     // Aktiv kabinetləri hesablamaq — aktiv növbədə (sifariş yazmaları bitəndən sonra oxusun)
-    const merged = await enqueue(activeQueueRef, async () => {
+    const result = await enqueue(activeQueueRef, async () => {
       markWrite();
       const latestActive = (await safeGet("active-sessions")) || {};
       const activeNow = {};
@@ -622,42 +685,41 @@ export default function App() {
         activeNow[cid] = normalizeCabin(cab, Number(cid));
       });
       const ids = Object.keys(activeNow).map(Number);
-      const dayKey = `sales:${businessDay}`;
-      let list = (await safeGet(dayKey)) || [];
+      const records = [];
+      for (const id of ids) {
+        const cabin = activeNow[id];
+        // Mənfi vaxt qoruması: bağlanma anı sessiyanın başlanğıcından geri ola bilməz
+        const endMs = Math.max(closeTimeMs, cabinStartTime(cabin));
+        const cabinCost = round2(segCost(cabin, endMs, settings.cabinRates));
+        const minutes = segElapsed(cabin, endMs) / 60000;
+        const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
+        const grandTotal = round2(cabinCost + stockTotal);
+        records.push({
+          id: `c${id}-${endMs}`,
+          type: "cabinet",
+          cabinetId: id,
+          startTime: cabinStartTime(cabin),
+          endTime: endMs,
+          minutes: Math.round(minutes),
+          cabinCost,
+          orders: cabin.orders,
+          stockTotal,
+          grandTotal,
+          segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? endMs })),
+        });
+      }
       if (ids.length > 0) {
-        for (const id of ids) {
-          const cabin = activeNow[id];
-          const cabinCost = round2(segCost(cabin, closeTimeMs, settings.cabinRates));
-          const minutes = segElapsed(cabin, closeTimeMs) / 60000;
-          const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
-          const grandTotal = round2(cabinCost + stockTotal);
-          list = [
-            ...list,
-            {
-              id: `c${id}-${closeTimeMs}`,
-              type: "cabinet",
-              cabinetId: id,
-              startTime: cabinStartTime(cabin),
-              endTime: closeTimeMs,
-              minutes: Math.round(minutes),
-              cabinCost,
-              orders: cabin.orders,
-              stockTotal,
-              grandTotal,
-              segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? closeTimeMs })),
-            },
-          ];
-        }
-        await safeSet(dayKey, list);
         setActive({});
         await safeSet("active-sessions", {});
       }
       await safeSet("day-open", false);
-      return { list, count: ids.length };
+      return { records, count: ids.length };
     });
+    if (result.records.length > 0) {
+      await mutateSales(businessDay, (list) => [...list, ...result.records]);
+    }
     setDayOpen(false);
-    setTodaySales(merged.list);
-    showToast(`Gün bağlandı${merged.count ? ` — ${merged.count} kabinet hesablandı` : ""}`, false);
+    showToast(`Gün bağlandı${result.count ? ` — ${result.count} kabinet hesablandı` : ""}`, false);
   }
 
   async function openDay(dateLabel, stockAdditions) {
@@ -686,7 +748,8 @@ export default function App() {
         });
         return nw;
       });
-      const mergedIntakes = [...newIntakes, ...intakes].slice(0, 80);
+      const freshIntakes = (await safeGet("stock-intakes")) || [];
+      const mergedIntakes = [...newIntakes, ...freshIntakes].slice(0, 80);
       setIntakes(mergedIntakes);
       await safeSet("stock-intakes", mergedIntakes);
     }
@@ -700,10 +763,32 @@ export default function App() {
       showToast("Əvvəlcə günü aç", true);
       return;
     }
-    const orders = Object.entries(items)
+    const requested = Object.entries(items)
       .filter(([, q]) => q > 0)
-      .map(([item, qty]) => ({ item, qty, unitPrice: findMenuItem(settings.menu, item)?.price ?? 0 }));
-    if (orders.length === 0) return;
+      .map(([item, qty]) => ({ item, qty }));
+    if (requested.length === 0) return;
+    setStockModalOpen(false);
+    // Anbardan yalnız mövcud qədər çıx (ən son qalıq) — həqiqi satılanı tut ki, satış = düşən olsun
+    const sold = {};
+    await mutateWarehouse((cur) => {
+      const nw = { ...cur };
+      requested.forEach(({ item, qty }) => {
+        const avail = nw[item] || 0;
+        const take = Math.min(avail, qty);
+        if (take > 0) {
+          nw[item] = round2(avail - take);
+          sold[item] = take;
+        }
+      });
+      return nw;
+    });
+    const orders = requested
+      .filter(({ item }) => (sold[item] || 0) > 0)
+      .map(({ item }) => ({ item, qty: sold[item], unitPrice: findMenuItem(settings.menu, item)?.price ?? 0 }));
+    if (orders.length === 0) {
+      showToast("Anbarda kifayət məhsul yoxdur", true);
+      return;
+    }
     const stockTotal = round2(orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
     const record = {
       id: `s-${Date.now()}`,
@@ -716,69 +801,96 @@ export default function App() {
       endTime: Date.now(),
     };
     await appendSale(record);
-    await mutateWarehouse((cur) => {
-      const nw = { ...cur };
-      orders.forEach((o) => {
-        nw[o.item] = round2(Math.max(0, (nw[o.item] || 0) - o.qty));
-      });
-      return nw;
-    });
-    setStockModalOpen(false);
     showToast(`Stok satışı əlavə edildi — ${money(stockTotal)}`, false);
   }
 
-  // Aktiv sessiyaya vaxt əlavə et — bitmə vaxtı irəli çəkilir, bildiriş yenidən aktivləşir
-  function extendSession(id, minutes) {
+  // Aktiv sessiyaya vaxt əlavə et. Paket ARTIQ bitibsə, boş qalan gözləmə vaxtı
+  // hesablanmır (sonuncu seqment irəli çəkilir) — müştəri o boşluğa görə ödəmir.
+  async function extendSession(id, minutes) {
     if (!active[id] || !minutes) return;
-    mutateActive((cur) => {
+    let ok = false;
+    await mutateActive((cur) => {
       const cabin = cur[id];
       if (!cabin) return cur;
-      const base = Math.max(Date.now(), cabin.plannedEndTime || Date.now());
+      ok = true;
+      const now = Date.now();
+      const planned = cabin.plannedEndTime;
+      let segments = cabin.segments;
+      let plannedEndTime;
+      if (planned && now > planned) {
+        const gap = now - planned; // paket bitəndən indiyə qədər boş vaxt
+        segments = cabin.segments.map((s, i) =>
+          i === cabin.segments.length - 1 && s.endTime == null ? { ...s, startTime: s.startTime + gap } : s
+        );
+        plannedEndTime = now + minutes * 60000;
+      } else {
+        plannedEndTime = (planned || now) + minutes * 60000;
+      }
       return {
         ...cur,
-        [id]: { ...cabin, plannedEndTime: base + minutes * 60000, planMinutes: (cabin.planMinutes || 0) + minutes, notified: false },
+        [id]: { ...cabin, segments, plannedEndTime, planMinutes: (cabin.planMinutes || 0) + minutes, notified: false },
       };
     });
-    showToast(`${cabinLabel(settings, id)} — ${minutes} dəq əlavə edildi`, false);
+    if (ok) showToast(`${cabinLabel(settings, id)} — ${minutes} dəq əlavə edildi`, false);
   }
 
-  // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır
+  // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır (atomik, təzə-oxu)
   async function deleteStockIntake(record) {
-    const nextIntakes = intakes.filter((r) => r.id !== record.id);
-    setIntakes(nextIntakes);
-    const ok = await safeSet("stock-intakes", nextIntakes);
-    if (!ok) {
-      showToast("Silinmədi", true);
-      return;
-    }
-    mutateWarehouse((cur) => ({
-      ...cur,
-      [record.item]: round2(Math.max(0, (cur[record.item] || 0) - record.qty)),
-    }));
+    await enqueue(warehouseQueueRef, async () => {
+      markWrite();
+      const freshIntakes = (await safeGet("stock-intakes")) || [];
+      const nextIntakes = freshIntakes.filter((r) => r.id !== record.id);
+      setIntakes(nextIntakes);
+      await safeSet("stock-intakes", nextIntakes);
+      const cur = (await safeGet("warehouse")) || {};
+      const nw = { ...cur, [record.item]: round2(Math.max(0, (cur[record.item] || 0) - record.qty)) };
+      setWarehouse(nw);
+      await safeSet("warehouse", nw);
+    });
     showToast(`Daxilolma silindi — ${record.qty} ədəd ${menuItemLabel(settings.menu, record.item)}`, false);
   }
 
-  // Bütün anbar qalıqlarını 0-la və daxilolma tarixçəsini təmizlə
+  // Aktiv sessiyaları təmizlə — kabinetlərdəki sifarişlərin stoku ANBARA GERİ QAYTARILIR (mal itmir)
+  async function resetSessions() {
+    const ordersToRestore = [];
+    await enqueue(activeQueueRef, async () => {
+      markWrite();
+      const latest = (await safeGet("active-sessions")) || {};
+      Object.values(latest).forEach((c) => (c.orders || []).forEach((o) => ordersToRestore.push(o)));
+      setActive({});
+      await safeSet("active-sessions", {});
+    });
+    if (ordersToRestore.length > 0) {
+      await mutateWarehouse((cur) => {
+        const nw = { ...cur };
+        ordersToRestore.forEach((o) => {
+          nw[o.item] = round2((nw[o.item] || 0) + o.qty);
+        });
+        return nw;
+      });
+    }
+    showToast("Aktiv sessiyalar sıfırlandı — stok anbara qaytarıldı", false);
+  }
+
+  // Bütün anbar qalıqlarını 0-la və daxilolma tarixçəsini təmizlə (növbədə — son yazma)
   async function resetWarehouse() {
-    persistWarehouse({});
-    setIntakes([]);
-    await safeSet("stock-intakes", []);
+    await enqueue(warehouseQueueRef, async () => {
+      markWrite();
+      setWarehouse({});
+      await safeSet("warehouse", {});
+      setIntakes([]);
+      await safeSet("stock-intakes", []);
+    });
     showToast("Anbar sıfırlandı — bütün qalıqlar 0", false);
   }
 
   // Hesabatdan səhv satış/sessiya qeydini sil — satılan stok anbara qaytarılır
   async function deleteSale(date, recordId) {
-    markWrite();
-    const key = `sales:${date}`;
-    const list = (await safeGet(key)) || [];
-    const rec = list.find((r) => r.id === recordId);
-    const next = list.filter((r) => r.id !== recordId);
-    const ok = await safeSet(key, next);
-    if (!ok) {
-      showToast("Silinmədi", true);
-      return list;
-    }
-    if (date === businessDay) setTodaySales(next);
+    let rec = null;
+    const next = await mutateSales(date, (list) => {
+      rec = list.find((r) => r.id === recordId) || null;
+      return list.filter((r) => r.id !== recordId);
+    });
     if (rec && rec.orders && rec.orders.length > 0) {
       await mutateWarehouse((cur) => {
         const nw = { ...cur };
@@ -794,38 +906,32 @@ export default function App() {
 
   // Bağlanmış qeyddən 1 ədəd mal geri qaytar — məbləğ gəlirdən çıxılır, mal stoka qayıdır
   async function returnSaleItem(date, recordId, itemId) {
-    markWrite();
-    const key = `sales:${date}`;
-    const list = (await safeGet(key)) || [];
     let returned = 0;
     let unitPrice = 0;
-    const next = list.map((r) => {
-      if (r.id !== recordId) return r;
-      const orders = [];
-      (r.orders || []).forEach((o) => {
-        if (o.item === itemId && returned === 0) {
-          returned = 1;
-          unitPrice = o.unitPrice;
-          if (o.qty - 1 > 0) orders.push({ ...o, qty: o.qty - 1 });
-        } else {
-          orders.push(o);
-        }
+    const cleaned = await mutateSales(date, (list) => {
+      const next = list.map((r) => {
+        if (r.id !== recordId) return r;
+        const orders = [];
+        (r.orders || []).forEach((o) => {
+          if (o.item === itemId && returned === 0) {
+            returned = 1;
+            unitPrice = o.unitPrice;
+            if (o.qty - 1 > 0) orders.push({ ...o, qty: o.qty - 1 });
+          } else {
+            orders.push(o);
+          }
+        });
+        const stockTotal = round2(orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
+        const grandTotal = round2((r.cabinCost || 0) + stockTotal);
+        return { ...r, orders, stockTotal, grandTotal };
       });
-      const stockTotal = round2(orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
-      const grandTotal = round2((r.cabinCost || 0) + stockTotal);
-      return { ...r, orders, stockTotal, grandTotal };
+      // Yalnız kabinetsiz STOK satışı tam boşalanda çıxar; kabinet sessiyalarını (pulsuz belə) saxla
+      return next.filter((r) => r.type !== "stock" || (r.orders && r.orders.length > 0));
     });
-    if (returned === 0) return list;
-    // Tam boşalmış (yalnız stok satışı) qeydi çıxar
-    const cleaned = next.filter((r) => (r.orders && r.orders.length > 0) || (r.cabinCost || 0) > 0);
-    const ok = await safeSet(key, cleaned);
-    if (!ok) {
-      showToast("Qaytarılmadı", true);
-      return list;
+    if (returned > 0) {
+      await mutateWarehouse((cur) => ({ ...cur, [itemId]: round2((cur[itemId] || 0) + returned) }));
+      showToast(`${returned} ədəd ${menuItemLabel(settings.menu, itemId)} qaytarıldı — ${money(unitPrice * returned)} çıxıldı`, false);
     }
-    if (date === businessDay) setTodaySales(cleaned);
-    await mutateWarehouse((cur) => ({ ...cur, [itemId]: round2((cur[itemId] || 0) + returned) }));
-    showToast(`${returned} ədəd ${menuItemLabel(settings.menu, itemId)} qaytarıldı — ${money(unitPrice * returned)} çıxıldı`, false);
     return cleaned;
   }
 
@@ -963,7 +1069,7 @@ export default function App() {
           ) : tab === "returns" && isManager ? (
             <ReturnsView businessDay={businessDay} settings={settings} onReturnItem={returnSaleItem} />
           ) : tab === "settings" && isManager ? (
-            <SettingsView settings={settings} onSave={persistSettings} activeIds={Object.keys(active).map(Number)} />
+            <SettingsView settings={settings} onSave={persistSettings} activeIds={Object.keys(active).map(Number)} onResetSessions={resetSessions} />
           ) : (
             <Dashboard
               active={active}
@@ -2449,7 +2555,7 @@ function MonthlyReport({ settings }) {
 }
 
 // ---------- SETTINGS ----------
-function SettingsView({ settings, onSave, activeIds }) {
+function SettingsView({ settings, onSave, activeIds, onResetSessions }) {
   const [form, setForm] = useState(settings);
   const [confirmReset, setConfirmReset] = useState(false);
   const [newCabinName, setNewCabinName] = useState("");
@@ -2625,7 +2731,7 @@ function SettingsView({ settings, onSave, activeIds }) {
           <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 15 }}>Sıfırlama</div>
         </div>
         <div style={{ color: T.muted, fontSize: 13 }} className="mb-3">
-          Bütün kabinetləri "boş" vəziyyətinə qaytarır. Keçmiş satış tarixçəsinə toxunmur.
+          Bütün kabinetləri "boş" vəziyyətinə qaytarır. Kabinetlərə əlavə edilmiş məhsulların stoku anbara geri qaytarılır. Keçmiş satış tarixçəsinə toxunmur.
         </div>
         {!confirmReset ? (
           <button
@@ -2638,9 +2744,9 @@ function SettingsView({ settings, onSave, activeIds }) {
         ) : (
           <div className="flex gap-2">
             <button
-              onClick={async () => {
-                await safeSet("active-sessions", {});
-                window.location.reload();
+              onClick={() => {
+                onResetSessions();
+                setConfirmReset(false);
               }}
               className="flex-1 py-2.5 rounded-xl text-sm font-semibold"
               style={{ background: T.danger, color: "#1A0A0F" }}
