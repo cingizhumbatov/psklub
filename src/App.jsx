@@ -565,85 +565,99 @@ export default function App() {
 
   async function checkoutCabin(id) {
     const endTime = Date.now();
-    // Ən son sessiya məlumatını backend-dən götür (başqa cihazda sifariş dəyişmiş ola bilər)
-    const latest = (await safeGet("active-sessions")) || {};
-    const raw = latest[id];
-    if (!raw) {
-      setModalCabin(null);
-      return;
-    }
-    const cabin = normalizeCabin(raw, Number(id));
-    const cabinCost = round2(segCost(cabin, endTime, settings.cabinRates));
-    const minutes = segElapsed(cabin, endTime) / 60000;
-    const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
-    const grandTotal = round2(cabinCost + stockTotal);
-    const record = {
-      id: `c${id}-${endTime}`,
-      type: "cabinet",
-      cabinetId: id,
-      startTime: cabinStartTime(cabin),
-      endTime,
-      minutes: Math.round(minutes),
-      cabinCost,
-      orders: cabin.orders,
-      stockTotal,
-      grandTotal,
-      segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? endTime })),
-    };
-    await appendSale(record);
-    await mutateActive((cur) => {
-      const next = { ...cur };
-      delete next[id];
-      return next;
-    });
     setModalCabin(null);
-    showToast(`${cabinLabel(settings, id)} bağlandı — ${money(grandTotal)}`, false);
+    // BÜTÜN əməliyyat aktiv növbədə — əvvəlki sifariş yazmaları bitəndən sonra oxusun.
+    // Əks halda sifarişlər hələ yazılmamış olarsa, satış BOŞ yazılır, amma stok düşür (uyğunsuzluq).
+    const grandTotal = await enqueue(activeQueueRef, async () => {
+      markWrite();
+      const latest = (await safeGet("active-sessions")) || {};
+      const raw = latest[id];
+      if (!raw) return null;
+      const cabin = normalizeCabin(raw, Number(id));
+      const cabinCost = round2(segCost(cabin, endTime, settings.cabinRates));
+      const minutes = segElapsed(cabin, endTime) / 60000;
+      const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
+      const grand = round2(cabinCost + stockTotal);
+      const record = {
+        id: `c${id}-${endTime}`,
+        type: "cabinet",
+        cabinetId: id,
+        startTime: cabinStartTime(cabin),
+        endTime,
+        minutes: Math.round(minutes),
+        cabinCost,
+        orders: cabin.orders,
+        stockTotal,
+        grandTotal: grand,
+        segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? endTime })),
+      };
+      // Satışı ən son siyahıya əlavə et
+      const skey = `sales:${businessDay}`;
+      const existing = (await safeGet(skey)) || [];
+      const nextSales = [...existing, record];
+      await safeSet(skey, nextSales);
+      setTodaySales(nextSales);
+      // Kabineti aktivdən çıxar (ən son vəziyyətdən)
+      const nextActive = {};
+      Object.entries(latest).forEach(([cid, cab]) => {
+        if (String(cid) !== String(id)) nextActive[cid] = normalizeCabin(cab, Number(cid));
+      });
+      setActive(nextActive);
+      await safeSet("active-sessions", nextActive);
+      return grand;
+    });
+    if (grandTotal !== null && grandTotal !== undefined) {
+      showToast(`${cabinLabel(settings, id)} bağlandı — ${money(grandTotal)}`, false);
+    }
   }
 
   async function closeDay(closeTimeMs) {
-    markWrite();
-    // Bütün cihazlardakı aktiv kabinetləri hesablamaq üçün ən son vəziyyəti oxu
-    const latestActive = (await safeGet("active-sessions")) || {};
-    const activeNow = {};
-    Object.entries(latestActive).forEach(([cid, cab]) => {
-      activeNow[cid] = normalizeCabin(cab, Number(cid));
-    });
-    const ids = Object.keys(activeNow).map(Number);
-    const dayKey = `sales:${businessDay}`;
-    let merged = (await safeGet(dayKey)) || [];
-    if (ids.length > 0) {
-      for (const id of ids) {
-        const cabin = activeNow[id];
-        const cabinCost = round2(segCost(cabin, closeTimeMs, settings.cabinRates));
-        const minutes = segElapsed(cabin, closeTimeMs) / 60000;
-        const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
-        const grandTotal = round2(cabinCost + stockTotal);
-        merged = [
-          ...merged,
-          {
-            id: `c${id}-${closeTimeMs}`,
-            type: "cabinet",
-            cabinetId: id,
-            startTime: cabinStartTime(cabin),
-            endTime: closeTimeMs,
-            minutes: Math.round(minutes),
-            cabinCost,
-            orders: cabin.orders,
-            stockTotal,
-            grandTotal,
-            segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? closeTimeMs })),
-          },
-        ];
-      }
-      await safeSet(dayKey, merged);
-      setActive({});
-      await safeSet("active-sessions", {});
-    }
-    await safeSet("day-open", false);
-    setDayOpen(false);
-    setTodaySales(merged);
-    showToast(`Gün bağlandı${ids.length ? ` — ${ids.length} kabinet hesablandı` : ""}`, false);
     setCloseDayOpen(false);
+    // Aktiv kabinetləri hesablamaq — aktiv növbədə (sifariş yazmaları bitəndən sonra oxusun)
+    const merged = await enqueue(activeQueueRef, async () => {
+      markWrite();
+      const latestActive = (await safeGet("active-sessions")) || {};
+      const activeNow = {};
+      Object.entries(latestActive).forEach(([cid, cab]) => {
+        activeNow[cid] = normalizeCabin(cab, Number(cid));
+      });
+      const ids = Object.keys(activeNow).map(Number);
+      const dayKey = `sales:${businessDay}`;
+      let list = (await safeGet(dayKey)) || [];
+      if (ids.length > 0) {
+        for (const id of ids) {
+          const cabin = activeNow[id];
+          const cabinCost = round2(segCost(cabin, closeTimeMs, settings.cabinRates));
+          const minutes = segElapsed(cabin, closeTimeMs) / 60000;
+          const stockTotal = round2(cabin.orders.reduce((s, o) => s + o.qty * o.unitPrice, 0));
+          const grandTotal = round2(cabinCost + stockTotal);
+          list = [
+            ...list,
+            {
+              id: `c${id}-${closeTimeMs}`,
+              type: "cabinet",
+              cabinetId: id,
+              startTime: cabinStartTime(cabin),
+              endTime: closeTimeMs,
+              minutes: Math.round(minutes),
+              cabinCost,
+              orders: cabin.orders,
+              stockTotal,
+              grandTotal,
+              segments: cabin.segments.map((s) => ({ cabinId: s.cabinId, startTime: s.startTime, endTime: s.endTime ?? closeTimeMs })),
+            },
+          ];
+        }
+        await safeSet(dayKey, list);
+        setActive({});
+        await safeSet("active-sessions", {});
+      }
+      await safeSet("day-open", false);
+      return { list, count: ids.length };
+    });
+    setDayOpen(false);
+    setTodaySales(merged.list);
+    showToast(`Gün bağlandı${merged.count ? ` — ${merged.count} kabinet hesablandı` : ""}`, false);
   }
 
   async function openDay(dateLabel, stockAdditions) {
