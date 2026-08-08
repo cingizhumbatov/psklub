@@ -2430,11 +2430,25 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
           <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Bu gün üçün sessiya yoxdur</div>
         )}
         {sessions.map((r, i) => (
-          <div key={r.id} className="flex items-center gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
-            <span style={{ fontSize: 14, flex: 1, minWidth: 0 }} className="truncate">
-              {r.segments && r.segments.length > 1 ? r.segments.map((s) => cabinLabel(settings, s.cabinId)).join(" → ") : cabinLabel(settings, r.cabinetId)}
-            </span>
-            <span style={{ color: T.muted, fontSize: 13 }} className="shrink-0">{fmtTime(r.startTime)}–{fmtTime(r.endTime)} · {r.minutes} dəq</span>
+          <div key={r.id} className="flex items-start gap-3 px-4 py-3" style={{ background: i % 2 ? T.panel : T.panel2 }}>
+            <div className="flex-1 min-w-0">
+              <div style={{ fontSize: 14 }} className="truncate">
+                {r.segments && r.segments.length > 1 ? r.segments.map((s) => cabinLabel(settings, s.cabinId)).join(" → ") : cabinLabel(settings, r.cabinetId)}
+              </div>
+              <div style={{ color: T.muted, fontSize: 11 }} className="truncate">
+                {fmtTime(r.startTime)}–{fmtTime(r.endTime)} · {r.minutes} dəq
+                {(r.cabinCost || 0) > 0 ? ` · vaxt ${money(r.cabinCost)}` : r.free ? " · pulsuz" : ""}
+              </div>
+              {r.orders && r.orders.length > 0 && (
+                <div style={{ color: T.free, fontSize: 11 }} className="flex items-start gap-1 mt-0.5">
+                  <ShoppingCart size={11} style={{ marginTop: 2, flexShrink: 0 }} />
+                  <span>
+                    {r.orders.map((o) => `${menuItemLabel(settings.menu, o.item)}×${o.qty}`).join(", ")}
+                    <span style={{ color: T.muted }}> ({money(r.stockTotal || 0)})</span>
+                  </span>
+                </div>
+              )}
+            </div>
             <span style={{ fontFamily: FONT_MONO, fontSize: 14, minWidth: 60, textAlign: "right" }} className="shrink-0">{money(r.grandTotal)}</span>
             {delControl(r.id)}
           </div>
