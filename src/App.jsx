@@ -295,6 +295,100 @@ export default function App() {
   const markWrite = () => {
     lastWriteRef.current = Date.now();
   };
+
+  // ---------- OFFLINE DAYANIQLIQ (işıq/internet kəsiləndə məlumat itməsin) ----------
+  const [online, setOnline] = useState(true);
+  const [pendingWrites, setPendingWrites] = useState(0);
+  // Offline zamanı lokal vəziyyəti baza kimi işlətmək üçün ref-lər (köhnə closure olmasın)
+  const activeRef = useRef(active);
+  const warehouseRef = useRef(warehouse);
+  const todaySalesRef = useRef(todaySales);
+  const intakesRef = useRef(intakes);
+  useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => { warehouseRef.current = warehouse; }, [warehouse]);
+  useEffect(() => { todaySalesRef.current = todaySales; }, [todaySales]);
+  useEffect(() => { intakesRef.current = intakes; }, [intakes]);
+
+  const OUTBOX_KEY = "psklub-outbox";
+  const flushingRef = useRef(false);
+  function readOutbox() {
+    try {
+      return JSON.parse(localStorage.getItem(OUTBOX_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+  function writeOutbox(o) {
+    try {
+      localStorage.setItem(OUTBOX_KEY, JSON.stringify(o));
+    } catch {}
+    setPendingWrites(Object.keys(o).length);
+  }
+  // Backend-dən oxu — çatarsa {ok:true,data}, çatmazsa {ok:false} (offline)
+  async function getFresh(key) {
+    try {
+      const res = await window.storage.get(key);
+      return { ok: true, data: res ? JSON.parse(res.value) : null };
+    } catch {
+      return { ok: false };
+    }
+  }
+  // Yaz — uğursuz olsa outbox-a (localStorage) yığ; internet gələndə göndərilir
+  async function persist(key, value) {
+    markWrite();
+    const ok = await safeSet(key, value);
+    const o = readOutbox();
+    if (ok) {
+      if (o[key] !== undefined) {
+        delete o[key];
+        writeOutbox(o);
+      }
+      setOnline(true);
+      return true;
+    }
+    o[key] = value;
+    writeOutbox(o);
+    setOnline(false);
+    return false;
+  }
+  // Outbox-u serverə göndər (internet qayıdanda)
+  async function flushOutbox() {
+    if (flushingRef.current) return;
+    flushingRef.current = true;
+    try {
+      const keys = Object.keys(readOutbox());
+      for (const key of keys) {
+        const val = readOutbox()[key];
+        if (val === undefined) continue;
+        const ok = await safeSet(key, val);
+        if (ok) {
+          const o = readOutbox();
+          delete o[key];
+          writeOutbox(o);
+        } else {
+          setOnline(false);
+          return;
+        }
+      }
+      if (Object.keys(readOutbox()).length === 0) setOnline(true);
+    } finally {
+      flushingRef.current = false;
+    }
+  }
+  useEffect(() => {
+    setPendingWrites(Object.keys(readOutbox()).length);
+    const onOnline = () => flushOutbox();
+    window.addEventListener("online", onOnline);
+    const id = setInterval(() => {
+      if (Object.keys(readOutbox()).length > 0) flushOutbox();
+    }, 5000);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Yazma növbələri — eyni cihazda sürətli əməliyyatlar bir-birini itirməsin (ardıcıl işləsin)
   const activeQueueRef = useRef(Promise.resolve());
   const warehouseQueueRef = useRef(Promise.resolve());
@@ -308,13 +402,12 @@ export default function App() {
   // Satış siyahısını toqquşmasız dəyiş: ən son sales:date oxu, birləşdir, yaz (növbədə)
   function mutateSales(date, mutator) {
     return enqueue(salesQueueRef, async () => {
-      markWrite();
       const key = `sales:${date}`;
-      const list = (await safeGet(key)) || [];
+      const r = await getFresh(key);
+      const list = r.ok ? r.data || [] : date === businessDayRef.current ? [...todaySalesRef.current] : [];
       const next = mutator(list);
-      const ok = await safeSet(key, next);
-      if (!ok) showToast("Satış siyahısı saxlanmadı", true);
       if (date === businessDayRef.current) setTodaySales(next);
+      await persist(key, next);
       return next;
     });
   }
@@ -384,6 +477,11 @@ export default function App() {
     if (loading || !role) return;
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const sync = async () => {
+      // Göndərilməmiş yerli yazma varsa — backend köhnədir; ÜSTÜNƏ YAZMA, əvvəlcə göndər
+      if (Object.keys(readOutbox()).length > 0) {
+        flushOutbox();
+        return;
+      }
       if (Date.now() - lastWriteRef.current < 2500) return; // lokal dəyişikliyi üstələmə
       const bd = (await safeGet("current-business-day")) || businessDayRef.current;
       const [s, a, w, ik, doStored, openedAt, t] = await Promise.all([
@@ -419,49 +517,44 @@ export default function App() {
   }, [loading, role]);
 
   async function persistSettings(next) {
-    markWrite();
     setSettings(next);
-    const ok = await safeSet("settings", next);
-    showToast(ok ? "Ayarlar saxlanıldı" : "Ayarlar saxlanmadı", !ok);
+    const ok = await persist("settings", next);
+    showToast(ok ? "Ayarlar saxlanıldı" : "Bağlantı yoxdur — internet gələndə saxlanılacaq", !ok);
   }
 
   async function appendSale(record) {
     await mutateSales(businessDay, (list) => [...list, record]);
   }
 
-  async function persistWarehouse(next) {
-    markWrite();
-    setWarehouse(next);
-    const ok = await safeSet("warehouse", next);
-    if (!ok) showToast("Anbar qalığı saxlanmadı", true);
-  }
-
   // Toqquşmasız yazma: backend-dən ƏN SON aktiv sessiyaları oxu, yalnız öz dəyişikliyini birləşdir.
   // Bu, başqa cihazın dəyişikliyinin (məs. bağlanmış kabinetin) üstələnməsinin qarşısını alır.
   function mutateActive(mutator) {
     return enqueue(activeQueueRef, async () => {
-      markWrite();
-      const latest = (await safeGet("active-sessions")) || {};
-      const cur = {};
-      Object.entries(latest).forEach(([cid, cab]) => {
-        cur[cid] = normalizeCabin(cab, Number(cid));
-      });
+      // Online: ən son backend vəziyyəti (cross-device). Offline: lokal vəziyyət.
+      const r = await getFresh("active-sessions");
+      let cur;
+      if (r.ok) {
+        cur = {};
+        Object.entries(r.data || {}).forEach(([cid, cab]) => {
+          cur[cid] = normalizeCabin(cab, Number(cid));
+        });
+      } else {
+        cur = { ...activeRef.current };
+      }
       const next = mutator(cur);
       setActive(next);
-      const ok = await safeSet("active-sessions", next);
-      if (!ok) showToast("Sessiya yadda saxlanmadı", true);
+      await persist("active-sessions", next);
       return next;
     });
   }
   // Anbar üçün eyni: ən son qalığı oxu, dəyişikliyi birləşdir (ardıcıl növbədə)
   function mutateWarehouse(mutator) {
     return enqueue(warehouseQueueRef, async () => {
-      markWrite();
-      const cur = (await safeGet("warehouse")) || {};
+      const r = await getFresh("warehouse");
+      const cur = r.ok ? r.data || {} : { ...warehouseRef.current };
       const next = mutator(cur);
       setWarehouse(next);
-      const ok = await safeSet("warehouse", next);
-      if (!ok) showToast("Anbar qalığı saxlanmadı", true);
+      await persist("warehouse", next);
       return next;
     });
   }
@@ -471,20 +564,21 @@ export default function App() {
   async function adjustStock(item, delta) {
     if (!delta) return;
     const applied = await enqueue(warehouseQueueRef, async () => {
-      markWrite();
-      const cur = (await safeGet("warehouse")) || {};
+      const rw = await getFresh("warehouse");
+      const cur = rw.ok ? rw.data || {} : { ...warehouseRef.current };
       const current = cur[item] || 0;
       const nextQty = round2(Math.max(0, current + delta));
       const app = round2(nextQty - current);
       if (app === 0) return 0;
       const nw = { ...cur, [item]: nextQty };
       setWarehouse(nw);
-      await safeSet("warehouse", nw);
+      await persist("warehouse", nw);
       const record = { id: `in-${Date.now()}-${seqRef.current++}`, item, qty: app, timestamp: Date.now(), businessDay };
-      const freshIntakes = (await safeGet("stock-intakes")) || [];
-      const nextIntakes = [record, ...freshIntakes].slice(0, 80);
+      const ri = await getFresh("stock-intakes");
+      const baseIntakes = ri.ok ? ri.data || [] : intakesRef.current;
+      const nextIntakes = [record, ...baseIntakes].slice(0, 80);
       setIntakes(nextIntakes);
-      await safeSet("stock-intakes", nextIntakes);
+      await persist("stock-intakes", nextIntakes);
       return app;
     });
     if (!applied) return;
@@ -497,10 +591,9 @@ export default function App() {
 
   // Menyu strukturunu (bölmə/məhsul) yenilə — Anbardan da əlavə edilə bilər
   function updateMenu(menu) {
-    markWrite();
     const next = { ...settings, menu };
     setSettings(next);
-    safeSet("settings", next);
+    persist("settings", next);
     // Menyudan çıxarılmış məhsulların "yetim" anbar qalığını təmizlə
     const validIds = new Set(menu.items.map((i) => i.id));
     mutateWarehouse((cur) => {
@@ -636,8 +729,8 @@ export default function App() {
     // BÜTÜN əməliyyat aktiv növbədə — əvvəlki sifariş yazmaları bitəndən sonra oxusun.
     // Əks halda sifarişlər hələ yazılmamış olarsa, satış BOŞ yazılır, amma stok düşür (uyğunsuzluq).
     const grandTotal = await enqueue(activeQueueRef, async () => {
-      markWrite();
-      const latest = (await safeGet("active-sessions")) || {};
+      const ra = await getFresh("active-sessions");
+      const latest = ra.ok ? ra.data || {} : { ...activeRef.current };
       const raw = latest[id];
       if (!raw) return null;
       const cabin = normalizeCabin(raw, Number(id));
@@ -666,7 +759,7 @@ export default function App() {
         if (String(cid) !== String(id)) nextActive[cid] = normalizeCabin(cab, Number(cid));
       });
       setActive(nextActive);
-      await safeSet("active-sessions", nextActive);
+      await persist("active-sessions", nextActive);
       return grand;
     });
     if (grandTotal !== null && grandTotal !== undefined) {
@@ -678,8 +771,8 @@ export default function App() {
     setCloseDayOpen(false);
     // Aktiv kabinetləri hesablamaq — aktiv növbədə (sifariş yazmaları bitəndən sonra oxusun)
     const result = await enqueue(activeQueueRef, async () => {
-      markWrite();
-      const latestActive = (await safeGet("active-sessions")) || {};
+      const ra = await getFresh("active-sessions");
+      const latestActive = ra.ok ? ra.data || {} : { ...activeRef.current };
       const activeNow = {};
       Object.entries(latestActive).forEach(([cid, cab]) => {
         activeNow[cid] = normalizeCabin(cab, Number(cid));
@@ -710,9 +803,9 @@ export default function App() {
       }
       if (ids.length > 0) {
         setActive({});
-        await safeSet("active-sessions", {});
+        await persist("active-sessions", {});
       }
-      await safeSet("day-open", false);
+      await persist("day-open", false);
       return { records, count: ids.length };
     });
     if (result.records.length > 0) {
@@ -723,17 +816,16 @@ export default function App() {
   }
 
   async function openDay(dateLabel, stockAdditions) {
-    markWrite();
     const bd = dateLabel || todayStr();
     const openedAt = Date.now();
-    await safeSet("current-business-day", bd);
-    await safeSet("day-open", true);
-    await safeSet("day-opened-at", openedAt);
+    await persist("current-business-day", bd);
+    await persist("day-open", true);
+    await persist("day-opened-at", openedAt);
     setBusinessDay(bd);
     setDayOpen(true);
     setDayOpenedAt(openedAt);
-    const sales = (await safeGet(`sales:${bd}`)) || [];
-    setTodaySales(sales);
+    const rs = await getFresh(`sales:${bd}`);
+    setTodaySales(rs.ok ? rs.data || [] : todaySalesRef.current);
 
     const entries = Object.entries(stockAdditions || {}).filter(([, q]) => q > 0);
     if (entries.length > 0) {
@@ -748,10 +840,11 @@ export default function App() {
         });
         return nw;
       });
-      const freshIntakes = (await safeGet("stock-intakes")) || [];
-      const mergedIntakes = [...newIntakes, ...freshIntakes].slice(0, 80);
+      const ri = await getFresh("stock-intakes");
+      const baseIntakes = ri.ok ? ri.data || [] : intakesRef.current;
+      const mergedIntakes = [...newIntakes, ...baseIntakes].slice(0, 80);
       setIntakes(mergedIntakes);
-      await safeSet("stock-intakes", mergedIntakes);
+      await persist("stock-intakes", mergedIntakes);
     }
 
     showToast(`Gün açıldı — ${bd}`, false);
@@ -837,15 +930,16 @@ export default function App() {
   // Anbara səhv daxil edilmiş malı sil — həmin qədər qalıqdan çıxılır (atomik, təzə-oxu)
   async function deleteStockIntake(record) {
     await enqueue(warehouseQueueRef, async () => {
-      markWrite();
-      const freshIntakes = (await safeGet("stock-intakes")) || [];
-      const nextIntakes = freshIntakes.filter((r) => r.id !== record.id);
+      const ri = await getFresh("stock-intakes");
+      const baseIntakes = ri.ok ? ri.data || [] : intakesRef.current;
+      const nextIntakes = baseIntakes.filter((r) => r.id !== record.id);
       setIntakes(nextIntakes);
-      await safeSet("stock-intakes", nextIntakes);
-      const cur = (await safeGet("warehouse")) || {};
+      await persist("stock-intakes", nextIntakes);
+      const rw = await getFresh("warehouse");
+      const cur = rw.ok ? rw.data || {} : { ...warehouseRef.current };
       const nw = { ...cur, [record.item]: round2(Math.max(0, (cur[record.item] || 0) - record.qty)) };
       setWarehouse(nw);
-      await safeSet("warehouse", nw);
+      await persist("warehouse", nw);
     });
     showToast(`Daxilolma silindi — ${record.qty} ədəd ${menuItemLabel(settings.menu, record.item)}`, false);
   }
@@ -854,11 +948,11 @@ export default function App() {
   async function resetSessions() {
     const ordersToRestore = [];
     await enqueue(activeQueueRef, async () => {
-      markWrite();
-      const latest = (await safeGet("active-sessions")) || {};
+      const ra = await getFresh("active-sessions");
+      const latest = ra.ok ? ra.data || {} : { ...activeRef.current };
       Object.values(latest).forEach((c) => (c.orders || []).forEach((o) => ordersToRestore.push(o)));
       setActive({});
-      await safeSet("active-sessions", {});
+      await persist("active-sessions", {});
     });
     if (ordersToRestore.length > 0) {
       await mutateWarehouse((cur) => {
@@ -875,11 +969,10 @@ export default function App() {
   // Bütün anbar qalıqlarını 0-la və daxilolma tarixçəsini təmizlə (növbədə — son yazma)
   async function resetWarehouse() {
     await enqueue(warehouseQueueRef, async () => {
-      markWrite();
       setWarehouse({});
-      await safeSet("warehouse", {});
+      await persist("warehouse", {});
       setIntakes([]);
-      await safeSet("stock-intakes", []);
+      await persist("stock-intakes", []);
     });
     showToast("Anbar sıfırlandı — bütün qalıqlar 0", false);
   }
@@ -959,6 +1052,17 @@ export default function App() {
         .dot-pulse { animation: pulse-dot 1.6s ease-in-out infinite; }
         input[type=date], input[type=month], input[type=time], input[type=number] { color-scheme: dark; }
       `}</style>
+
+      {(!online || pendingWrites > 0) && !showMenu && (
+        <div
+          className="fixed top-0 left-0 right-0 z-50 px-4 py-2 text-center text-sm font-semibold flex items-center justify-center gap-2"
+          style={{ background: online ? T.amber : T.danger, color: "#1A0A0F" }}
+        >
+          {online
+            ? `Bağlantı bərpa olunur — ${pendingWrites} dəyişiklik göndərilir…`
+            : `⚠ İnternet yoxdur — dəyişikliklər cihazda saxlanılır, bağlantı gələndə göndəriləcək (${pendingWrites})`}
+        </div>
+      )}
 
       {showMenu ? (
         <PublicMenu onBack={menuFromApp ? closeMenu : undefined} />
