@@ -10,7 +10,12 @@ const storage = {
     // əks halda bağlanmış kabinet/köhnə stok geri qayıda bilər.
     const res = await fetch(`${API}/api/storage/get?key=${encodeURIComponent(key)}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`storage.get failed: ${res.status}`);
-    const data = await res.json();
+    // Açar yoxdursa backend boş body və ya "null" qaytara bilər.
+    // Bunu XƏTA saymamalıyıq — əks halda getFresh "offline" sanıb köhnə günün
+    // datasına düşür və satışlar səhv günə yazılır (hesabat rəqəmləri şişir).
+    const text = await res.text();
+    if (!text || text === "null") return null;
+    const data = JSON.parse(text);
     if (data == null) return null;
     return { value: data.value };
   },

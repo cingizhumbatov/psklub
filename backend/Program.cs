@@ -73,7 +73,9 @@ app.MapGet("/api/storage/get", (string key) =>
         cmd.CommandText = "SELECT Value FROM Store WHERE Key = $key";
         cmd.Parameters.AddWithValue("$key", key);
         var result = cmd.ExecuteScalar();
-        if (result is null) return Results.Json<object?>(null);
+        // Açar yoxdursa literal "null" JSON qaytar (boş body YOX) — frontend bunu
+        // düzgün "məlumat yoxdur" kimi anlasın, "offline" ilə qarışdırmasın.
+        if (result is null) return Results.Content("null", "application/json");
         return Results.Json(new { value = (string)result });
     }
     catch (Exception ex)
