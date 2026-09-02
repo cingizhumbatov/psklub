@@ -2163,6 +2163,134 @@ function Modal({ title, children, onClose }) {
 }
 
 // ---------- WAREHOUSE ----------
+// ---------- MAYA DƏYƏRLƏRİ ----------
+// Məhsulun alış (maya) dəyəri məhsulun özündə saxlanılır: menu.items[].cost
+// Sahə boş buraxıla bilər — o zaman məhsulda maya dəyəri yoxdur (cost silinir).
+// Yazma yalnız "Yadda saxla" ilə olur: hər hərfdə serverə sorğu getməsin.
+function CostPricesPanel({ menu, warehouse, onMenuChange }) {
+  const [draft, setDraft] = useState({}); // itemId -> yazılan mətn
+  const [justSaved, setJustSaved] = useState(false);
+  useEffect(() => {
+    if (!justSaved) return;
+    const id = setTimeout(() => setJustSaved(false), 2500);
+    return () => clearTimeout(id);
+  }, [justSaved]);
+
+  const textOf = (it) => (draft[it.id] !== undefined ? draft[it.id] : it.cost != null ? String(it.cost) : "");
+  // Boş sahə → null (maya təyin edilməyib). Yanlış/mənfi dəyər → null.
+  const costOf = (it) => {
+    const t = textOf(it).trim().replace(",", ".");
+    if (t === "") return null;
+    const n = parseFloat(t);
+    return Number.isFinite(n) && n >= 0 ? round2(n) : null;
+  };
+  const storedOf = (it) => (it.cost != null ? round2(it.cost) : null);
+  const dirty = menu.items.some((it) => draft[it.id] !== undefined && costOf(it) !== storedOf(it));
+
+  function save() {
+    const items = menu.items.map((it) => {
+      if (draft[it.id] === undefined) return it;
+      const c = costOf(it);
+      const next = { ...it };
+      if (c === null) delete next.cost;
+      else next.cost = c;
+      return next;
+    });
+    onMenuChange({ ...menu, items });
+    setDraft({});
+    setJustSaved(true);
+  }
+
+  // Anbardakı malın maya ilə ümumi dəyəri — maya dəyəri təyin olunanlar üzrə
+  const stockValue = menu.items.reduce((s, it) => {
+    const c = storedOf(it);
+    return c == null ? s : s + c * (warehouse[it.id] || 0);
+  }, 0);
+  const missing = menu.items.filter((it) => storedOf(it) == null).length;
+
+  return (
+    <div className="mb-5">
+      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+        <div style={{ color: T.muted, fontSize: 12 }}>
+          Maya dəyərləri
+          {missing > 0 && <span style={{ color: T.amber }}> · {missing} məhsulda doldurulmayıb</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          {justSaved && <span style={{ color: T.free, fontSize: 12 }}>Saxlanıldı</span>}
+          <button
+            onClick={save}
+            disabled={!dirty}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+            style={{
+              background: dirty ? T.free : T.panel2,
+              color: dirty ? "#0B0D14" : T.muted,
+              border: dirty ? "none" : `1px solid ${T.border}`,
+            }}
+          >
+            Yadda saxla
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
+        {menu.items.length === 0 ? (
+          <div className="px-4 py-4 text-sm" style={{ color: T.muted }}>Hələ məhsul yoxdur</div>
+        ) : (
+          menu.items.map((it, i) => {
+            const c = costOf(it);
+            const profit = c == null ? null : round2(it.price - c);
+            return (
+              <div
+                key={it.id}
+                className="flex items-center gap-2 px-3 py-2.5"
+                style={{ background: i % 2 ? T.panel : T.panel2, borderTop: i ? `1px solid ${T.border}` : "none" }}
+              >
+                <div className="flex-1 min-w-0">
+                  <div style={{ fontSize: 14 }} className="truncate">{it.name}</div>
+                  <div style={{ color: T.muted, fontSize: 11 }}>
+                    satış {money(it.price)} · anbarda {warehouse[it.id] || 0}
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  inputMode="decimal"
+                  placeholder="maya"
+                  value={textOf(it)}
+                  onChange={(e) => setDraft((p) => ({ ...p, [it.id]: e.target.value }))}
+                  className="w-20 px-2 py-1.5 rounded-lg text-sm text-right shrink-0"
+                  style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                />
+                <span
+                  className="shrink-0"
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 12,
+                    minWidth: 62,
+                    textAlign: "right",
+                    color: profit == null ? T.muted : profit < 0 ? T.danger : T.free,
+                  }}
+                  title="Bir ədəddən qazanc (satış − maya)"
+                >
+                  {profit == null ? "—" : `${profit > 0 ? "+" : ""}${money(profit)}`}
+                </span>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {stockValue > 0 && (
+        <div className="flex items-center justify-between px-3 py-2 mt-2 rounded-xl" style={{ background: T.panel }}>
+          <span style={{ color: T.muted, fontSize: 12 }}>Anbardakı malın maya dəyəri</span>
+          <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 14 }}>{money(stockValue)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenuChange, onDeleteIntake, onReset }) {
   const [amounts, setAmounts] = useState({});
   const [confirmDelete, setConfirmDelete] = useState(null);
@@ -2195,7 +2323,11 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
     const name = (f.name || "").trim();
     const price = parseFloat(f.price) || 0;
     if (!name) return;
-    onMenuChange({ ...menu, items: [...menu.items, { id: `item-${Date.now()}`, name, categoryId: catId, price }] });
+    const item = { id: `item-${Date.now()}`, name, categoryId: catId, price };
+    // Maya dəyəri könüllüdür — boş qalsa məhsulda cost sahəsi olmur
+    const cost = parseFloat(String(f.cost ?? "").replace(",", "."));
+    if (Number.isFinite(cost) && cost >= 0) item.cost = round2(cost);
+    onMenuChange({ ...menu, items: [...menu.items, item] });
     setAddItemForms((p) => ({ ...p, [catId]: undefined }));
   }
   function deleteItem(itemId) {
@@ -2250,7 +2382,7 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
                 <Icon size={15} color={T.muted} /> {cat.name}
               </span>
               <button
-                onClick={() => setAddItemForms((p) => ({ ...p, [cat.id]: p[cat.id] ? undefined : { name: "", price: "" } }))}
+                onClick={() => setAddItemForms((p) => ({ ...p, [cat.id]: p[cat.id] ? undefined : { name: "", price: "", cost: "" } }))}
                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0"
                 style={{ background: T.panel, border: `1px solid ${T.border}`, color: T.text }}
               >
@@ -2271,10 +2403,20 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
                   type="number"
                   step="0.1"
                   min="0"
-                  placeholder="qiymət"
+                  placeholder="satış"
                   value={addForm.price}
                   onChange={(e) => setAddItemForms((p) => ({ ...p, [cat.id]: { ...addForm, price: e.target.value } }))}
-                  className="w-20 px-2 py-1.5 rounded-lg text-sm"
+                  className="w-16 px-2 py-1.5 rounded-lg text-sm"
+                  style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
+                />
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="maya"
+                  value={addForm.cost || ""}
+                  onChange={(e) => setAddItemForms((p) => ({ ...p, [cat.id]: { ...addForm, cost: e.target.value } }))}
+                  className="w-16 px-2 py-1.5 rounded-lg text-sm"
                   style={{ background: T.panel2, border: `1px solid ${T.border}`, color: T.text, fontFamily: FONT_MONO }}
                 />
                 <button
@@ -2381,6 +2523,8 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
           <Plus size={14} /> Yeni bölmə
         </button>
       </div>
+
+      <CostPricesPanel menu={menu} warehouse={warehouse} onMenuChange={onMenuChange} />
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Son hərəkətlər</div>
       <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
