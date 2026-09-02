@@ -54,29 +54,46 @@ using (var conn = OpenConnection())
     // WAL — eyni anda oxu+yaz üçün daha yaxşı konkurentlik (bir dəfə DB faylına yazılır)
     cmd.CommandText = "PRAGMA journal_mode=WAL;";
     cmd.ExecuteNonQuery();
+    // Version — hər yazmada 1 artır. Frontend oxuduğu versiyanı geri göndərir;
+    // aralıqda başqa cihaz yazıbsa yazma rədd edilir (409) və birləşdirilib təkrarlanır.
     cmd.CommandText = @"CREATE TABLE IF NOT EXISTS Store (
-        Key   TEXT PRIMARY KEY,
-        Value TEXT NOT NULL
+        Key     TEXT PRIMARY KEY,
+        Value   TEXT NOT NULL,
+        Version INTEGER NOT NULL DEFAULT 0
     );";
     cmd.ExecuteNonQuery();
+    // Köhnə bazada Version sütunu olmaya bilər — miqrasiya
+    var hasVersion = false;
+    cmd.CommandText = "PRAGMA table_info(Store);";
+    using (var info = cmd.ExecuteReader())
+    {
+        while (info.Read())
+            if (string.Equals(info.GetString(1), "Version", StringComparison.OrdinalIgnoreCase))
+                hasVersion = true;
+    }
+    if (!hasVersion)
+    {
+        cmd.CommandText = "ALTER TABLE Store ADD COLUMN Version INTEGER NOT NULL DEFAULT 0;";
+        cmd.ExecuteNonQuery();
+    }
 }
 
 // ---------- Endpoint-lər (frontend window.storage interfeysinə uyğun) ----------
 
-// GET /api/storage/get?key=...  ->  { value } | null
+// GET /api/storage/get?key=...  ->  { value, version } | null
 app.MapGet("/api/storage/get", (string key) =>
 {
     try
     {
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT Value FROM Store WHERE Key = $key";
+        cmd.CommandText = "SELECT Value, Version FROM Store WHERE Key = $key";
         cmd.Parameters.AddWithValue("$key", key);
-        var result = cmd.ExecuteScalar();
+        using var reader = cmd.ExecuteReader();
         // Açar yoxdursa literal "null" JSON qaytar (boş body YOX) — frontend bunu
         // düzgün "məlumat yoxdur" kimi anlasın, "offline" ilə qarışdırmasın.
-        if (result is null) return Results.Content("null", "application/json");
-        return Results.Json(new { value = (string)result });
+        if (!reader.Read()) return Results.Content("null", "application/json");
+        return Results.Json(new { value = reader.GetString(0), version = reader.GetInt64(1) });
     }
     catch (Exception ex)
     {
@@ -84,7 +101,13 @@ app.MapGet("/api/storage/get", (string key) =>
     }
 });
 
-// POST /api/storage/set  { key, value }  ->  { ok: true }
+// POST /api/storage/set  { key, value, expectedVersion? }
+//   expectedVersion YOXDURSA  -> şərtsiz yazır (son yazan qalib) — skalyar açarlar üçün
+//   expectedVersion VARSA     -> yalnız versiya uyğun gələndə yazır (optimistik kilid).
+//     Uyğun gəlmirsə 409 + serverdəki son { value, version } qaytarılır ki, frontend
+//     öz dəyişikliyini onun ÜZƏRİNƏ birləşdirib təkrar göndərsin.
+//   Bu, iki cihaz eyni anda yazanda "itmiş yeniləmə"nin (bağlanmış kabinetin geri
+//   qayıtmasının, stok qalığının geri sıçramasının) qarşısını alır.
 app.MapPost("/api/storage/set", (StoreEntry entry) =>
 {
     if (entry is null || entry.Key is null || entry.Value is null)
@@ -92,13 +115,68 @@ app.MapPost("/api/storage/set", (StoreEntry entry) =>
     try
     {
         using var conn = OpenConnection();
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"INSERT INTO Store (Key, Value) VALUES ($key, $value)
-            ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value";
-        cmd.Parameters.AddWithValue("$key", entry.Key);
-        cmd.Parameters.AddWithValue("$value", entry.Value);
-        cmd.ExecuteNonQuery();
-        return Results.Json(new { ok = true });
+        // BEGIN IMMEDIATE — oxu+yaz bir atomik əməliyyat kimi (yazma kilidi dərhal alınır)
+        using (var begin = conn.CreateCommand())
+        {
+            begin.CommandText = "BEGIN IMMEDIATE;";
+            begin.ExecuteNonQuery();
+        }
+        try
+        {
+            long currentVersion = 0;
+            string? currentValue = null;
+            using (var sel = conn.CreateCommand())
+            {
+                sel.CommandText = "SELECT Value, Version FROM Store WHERE Key = $key";
+                sel.Parameters.AddWithValue("$key", entry.Key);
+                using var r = sel.ExecuteReader();
+                if (r.Read())
+                {
+                    currentValue = r.GetString(0);
+                    currentVersion = r.GetInt64(1);
+                }
+            }
+
+            if (entry.ExpectedVersion is long expected && expected != currentVersion)
+            {
+                using (var rb = conn.CreateCommand())
+                {
+                    rb.CommandText = "ROLLBACK;";
+                    rb.ExecuteNonQuery();
+                }
+                return Results.Json(
+                    new { ok = false, conflict = true, value = currentValue, version = currentVersion },
+                    statusCode: 409);
+            }
+
+            var nextVersion = currentVersion + 1;
+            using (var up = conn.CreateCommand())
+            {
+                up.CommandText = @"INSERT INTO Store (Key, Value, Version) VALUES ($key, $value, $ver)
+                    ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value, Version = excluded.Version";
+                up.Parameters.AddWithValue("$key", entry.Key);
+                up.Parameters.AddWithValue("$value", entry.Value);
+                up.Parameters.AddWithValue("$ver", nextVersion);
+                up.ExecuteNonQuery();
+            }
+            using (var commit = conn.CreateCommand())
+            {
+                commit.CommandText = "COMMIT;";
+                commit.ExecuteNonQuery();
+            }
+            return Results.Json(new { ok = true, version = nextVersion });
+        }
+        catch
+        {
+            try
+            {
+                using var rb = conn.CreateCommand();
+                rb.CommandText = "ROLLBACK;";
+                rb.ExecuteNonQuery();
+            }
+            catch { /* tranzaksiya artıq bağlanıb */ }
+            throw;
+        }
     }
     catch (Exception ex)
     {
@@ -159,5 +237,5 @@ app.MapFallbackToFile("index.html");
 
 app.Run();
 
-record StoreEntry(string Key, string Value);
+record StoreEntry(string Key, string Value, long? ExpectedVersion);
 record KeyOnly(string Key);

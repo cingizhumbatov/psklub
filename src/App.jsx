@@ -6,6 +6,7 @@ import {
   Infinity as InfinityIcon, ChevronDown, ChevronRight, Undo2,
   Triangle, Circle, Square, UtensilsCrossed, ArrowLeft,
 } from "lucide-react";
+import { mergeForKey, isMergeableKey } from "./merge.js";
 
 // Kabinet başlatma vaxt paketləri
 const PLANS = [
@@ -165,12 +166,13 @@ async function safeGet(key) {
 }
 async function safeSet(key, value) {
   try {
-    await window.storage.set(key, JSON.stringify(value), false);
-    return true;
+    const r = await window.storage.set(key, JSON.stringify(value));
+    return r?.ok !== false;
   } catch {
     return false;
   }
 }
+
 
 export default function App() {
   const [loading, setLoading] = useState(true);
@@ -324,21 +326,120 @@ export default function App() {
     } catch {}
     setPendingWrites(Object.keys(o).length);
   }
-  // Backend-dən oxu — çatarsa {ok:true,data}, çatmazsa {ok:false} (offline)
-  async function getFresh(key) {
+  // Oxuduğumuz versiya + baza şəkli (CAS üçün). getFresh yazır, persist istifadə edib silir.
+  const casRef = useRef(new Map());
+  // Serverə uğurla yazdığımız son versiya — sinxronizasiya köhnə cavabı tətbiq etməsin
+  const lastVersionRef = useRef(new Map());
+
+  // Xam oxu — CAS bazasını QEYD ETMİR (sinxronizasiya üçün)
+  async function readRaw(key) {
     try {
       const res = await window.storage.get(key);
-      return { ok: true, data: res ? JSON.parse(res.value) : null };
+      return { ok: true, data: res ? JSON.parse(res.value) : null, version: res ? res.version : 0 };
     } catch {
       return { ok: false };
     }
   }
-  // Yaz — uğursuz olsa outbox-a (localStorage) yığ; internet gələndə göndərilir
+  // Offline zamanı mutator-un işlədiyi yerli baza (getFresh oxuya bilməyəndə)
+  function localSnapshot(key) {
+    if (key === "active-sessions") return activeRef.current;
+    if (key === "warehouse") return warehouseRef.current;
+    if (key === "stock-intakes") return intakesRef.current;
+    if (key === `sales:${businessDayRef.current}`) return todaySalesRef.current;
+    return undefined;
+  }
+  // Backend-dən oxu — çatarsa {ok:true,data}, çatmazsa {ok:false} (offline).
+  // Oxunan versiya yadda saxlanılır ki, növbəti persist onu şərt kimi göndərsin.
+  // Oxu alınmasa da yerli vəziyyət BAZA kimi qeyd olunur (version:null) — belədə
+  // yazma serverin üstünü ƏZMİR, birləşdirilir.
+  async function getFresh(key) {
+    const r = await readRaw(key);
+    if (r.ok) {
+      casRef.current.set(key, { version: r.version, base: r.data, at: Date.now() });
+    } else {
+      const snap = localSnapshot(key);
+      if (snap === undefined) casRef.current.delete(key);
+      else casRef.current.set(key, { version: null, base: snap, at: Date.now() });
+    }
+    return r;
+  }
+
+  // Birləşdirmədən sonra yerli React vəziyyətini serverdəki nəticə ilə uyğunlaşdır
+  function applyMerged(key, value) {
+    if (key === "active-sessions") {
+      const norm = {};
+      Object.entries(value || {}).forEach(([cid, cab]) => {
+        norm[cid] = normalizeCabin(cab, Number(cid));
+      });
+      setActive(norm);
+    } else if (key === "warehouse") setWarehouse(value || {});
+    else if (key === "stock-intakes") setIntakes(value || []);
+    else if (key === `sales:${businessDayRef.current}`) setTodaySales(value || []);
+  }
+
+  // Versiyalı yazma. Konflikt olarsa (aralıqda başqa cihaz yazıb) serverin son
+  // vəziyyəti ilə üç-tərəfli birləşdirib təkrar göndərir — dəyişikliklər itmir,
+  // bağlanmış kabinet geri qayıtmır. Şəbəkə xətasında {ok:false} qaytarır.
+  async function casWrite(key, value, rec) {
+    let mine = value;
+    let base = rec ? rec.base : undefined;
+    let expected = rec && isMergeableKey(key) ? rec.version : null;
+    let merged = false;
+    // Baza var, amma versiya yoxdur (oxu alınmamışdı) — kor-koranə YAZMA.
+    // Əvvəlcə serverin son vəziyyətini oxu, dəyişikliyi onun üstünə birləşdir.
+    if (rec && expected === null && rec.version === null && isMergeableKey(key)) {
+      const cur = await readRaw(key);
+      if (!cur.ok) return { ok: false }; // hələ də offline → outbox
+      mine = mergeForKey(key, base, mine, cur.data);
+      base = cur.data;
+      expected = cur.version;
+      merged = true;
+    }
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let res;
+      try {
+        res = await window.storage.set(key, JSON.stringify(mine), expected);
+      } catch {
+        return { ok: false }; // şəbəkə xətası → outbox
+      }
+      if (res.ok) {
+        lastVersionRef.current.set(key, res.version);
+        if (merged) applyMerged(key, mine);
+        return { ok: true, value: mine };
+      }
+      if (!res.conflict) return { ok: false };
+      // Konflikt: serverin son vəziyyəti
+      let theirs = null;
+      try {
+        theirs = res.value == null ? null : JSON.parse(res.value);
+      } catch {
+        theirs = null;
+      }
+      if (base === undefined) {
+        // Baza məlum deyil — birləşdirə bilmirik, şərtsiz yaz (son yazan qalib)
+        expected = null;
+        continue;
+      }
+      mine = mergeForKey(key, base, mine, theirs);
+      base = theirs;
+      expected = res.version;
+      merged = true;
+    }
+    return { ok: false };
+  }
+
+  // Yaz — uğursuz olsa outbox-a (localStorage) yığ; internet gələndə göndərilir.
+  // Outbox-da dəyərlə birlikdə BAZA da saxlanılır ki, sonradan göndəriləndə
+  // serverin yeni vəziyyətini əzməsin, yalnız öz dəyişikliyini üstünə qoysun.
   async function persist(key, value) {
     markWrite();
-    const ok = await safeSet(key, value);
+    const rec = casRef.current.get(key);
+    casRef.current.delete(key);
+    // Çox köhnə baza (>60 san) etibarsızdır — şərtsiz yazmaya keç
+    const fresh = rec && Date.now() - rec.at < 60000 ? rec : undefined;
+    const res = await casWrite(key, value, fresh);
     const o = readOutbox();
-    if (ok) {
+    if (res.ok) {
       if (o[key] !== undefined) {
         delete o[key];
         writeOutbox(o);
@@ -346,22 +447,41 @@ export default function App() {
       setOnline(true);
       return true;
     }
-    o[key] = value;
+    o[key] = { __ob: 1, value, base: fresh ? fresh.base : undefined, at: Date.now() };
     writeOutbox(o);
     setOnline(false);
     return false;
   }
-  // Outbox-u serverə göndər (internet qayıdanda)
+
+  // Outbox-u serverə göndər (internet qayıdanda) — birləşdirərək, əzmədən
   async function flushOutbox() {
     if (flushingRef.current) return;
     flushingRef.current = true;
     try {
       const keys = Object.keys(readOutbox());
       for (const key of keys) {
-        const val = readOutbox()[key];
-        if (val === undefined) continue;
-        const ok = await safeSet(key, val);
-        if (ok) {
+        const entry = readOutbox()[key];
+        if (entry === undefined) continue;
+        // Yeni format {__ob:1,...} — bazası ilə birləşdirilə bilir.
+        // Köhnə format (xam dəyər) — bazası yoxdur, şərtsiz yazılır.
+        const isNew = entry && typeof entry === "object" && entry.__ob === 1;
+        const value = isNew ? entry.value : entry;
+        let toWrite = value;
+        let rec;
+        if (isNew && entry.base !== undefined && isMergeableKey(key)) {
+          // Serverin son vəziyyətini oxu və bizim dəyişikliyi onun ÜZƏRİNƏ qoy.
+          // (Blok halında əzsək, aralıqda bağlanmış kabinetlər geri qayıdardı.)
+          const cur = await readRaw(key);
+          if (!cur.ok) {
+            setOnline(false);
+            return;
+          }
+          toWrite = mergeForKey(key, entry.base, value, cur.data);
+          rec = { base: cur.data, version: cur.version, at: Date.now() };
+        }
+        const res = await casWrite(key, toWrite, rec);
+        if (res.ok && toWrite !== value) applyMerged(key, res.value);
+        if (res.ok) {
           const o = readOutbox();
           delete o[key];
           writeOutbox(o);
@@ -404,7 +524,13 @@ export default function App() {
     return enqueue(salesQueueRef, async () => {
       const key = `sales:${date}`;
       const r = await getFresh(key);
-      const list = r.ok ? r.data || [] : date === businessDayRef.current ? [...todaySalesRef.current] : [];
+      // Keçmiş günün siyahısını oxuya bilmiriksə — yerli nüsxə YOXDUR.
+      // Boş siyahı ilə davam etsək, o günün bütün satışları silinərdi.
+      if (!r.ok && date !== businessDayRef.current) {
+        showToast("Bağlantı yoxdur — bu günün qeydləri dəyişdirilə bilmədi", true);
+        return null;
+      }
+      const list = r.ok ? r.data || [] : [...todaySalesRef.current];
       const next = mutator(list);
       if (date === businessDayRef.current) setTodaySales(next);
       await persist(key, next);
@@ -484,9 +610,9 @@ export default function App() {
       }
       if (Date.now() - lastWriteRef.current < 2500) return; // lokal dəyişikliyi üstələmə
       const bd = (await safeGet("current-business-day")) || businessDayRef.current;
-      const [s, a, w, ik, doStored, openedAt, t] = await Promise.all([
+      const [s, ra, w, ik, doStored, openedAt, t] = await Promise.all([
         safeGet("settings"),
-        safeGet("active-sessions"),
+        readRaw("active-sessions"),
         safeGet("warehouse"),
         safeGet("stock-intakes"),
         safeGet("day-open"),
@@ -498,9 +624,14 @@ export default function App() {
         const ns = normalizeSettings(s);
         setSettings((prev) => (same(prev, ns) ? prev : ns));
       }
-      if (a) {
+      // Kabinetlər: bu oxu bizim son yazmamızdan ƏVVƏLKİ vəziyyəti qaytarıbsa
+      // (yavaş şəbəkədə sorğu bizim yazmadan əvvəl yola düşüb) — TƏTBİQ ETMƏ.
+      // Əks halda bağlanmış kabinet ekranda bir neçə saniyə "açıq" görünürdü.
+      const lastWritten = lastVersionRef.current.get("active-sessions");
+      const staleRead = ra.ok && lastWritten != null && ra.version < lastWritten;
+      if (ra.ok && ra.data && !staleRead) {
         const norm = {};
-        Object.entries(a).forEach(([cid, cab]) => {
+        Object.entries(ra.data).forEach(([cid, cab]) => {
           norm[cid] = normalizeCabin(cab, Number(cid));
         });
         setActive((prev) => (same(prev, norm) ? prev : norm));
@@ -808,6 +939,10 @@ export default function App() {
       await persist("day-open", false);
       return { records, count: ids.length };
     });
+    if (!result) {
+      showToast("Gün bağlanmadı — yenidən cəhd edin", true);
+      return;
+    }
     if (result.records.length > 0) {
       await mutateSales(businessDay, (list) => [...list, ...result.records]);
     }
@@ -2354,7 +2489,7 @@ function ReturnsView({ businessDay, settings, onReturnItem }) {
 
   async function handleReturn(recordId, itemId) {
     const next = await onReturnItem(date, recordId, itemId);
-    setSales(next);
+    if (next) setSales(next);
   }
 
   if (sales === null) return <div style={{ color: T.muted }}>Yüklənir…</div>;
@@ -2460,7 +2595,7 @@ function DailyReport({ defaultDate, settings, onDeleteSale }) {
 
   async function handleDelete(recordId) {
     const next = await onDeleteSale(date, recordId);
-    setSales(next);
+    if (next) setSales(next);
     setConfirmDel(null);
   }
 
