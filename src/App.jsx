@@ -301,6 +301,47 @@ export default function App() {
   // ---------- OFFLINE DAYANIQLIQ (işıq/internet kəsiləndə məlumat itməsin) ----------
   const [online, setOnline] = useState(true);
   const [pendingWrites, setPendingWrites] = useState(0);
+
+  // ---------- YENİ VERSİYA AVTOMATİK ÇATSIN ----------
+  // İşçilər tətbiqi telefonda günlərlə açıq saxlayır — səhifə yenilənmədiyi üçün
+  // deploy edilən düzəliş onlara çatmırdı (kabinet düzəlişi məhz buna görə
+  // telefonlarda işləməmişdi). index.html-i dəqiqədə bir yoxlayırıq: build faylının
+  // adı dəyişibsə, deməli yeni versiya var.
+  const [updateReady, setUpdateReady] = useState(false);
+  useEffect(() => {
+    const tag = document.querySelector('script[type="module"][src]');
+    const mine = tag ? tag.getAttribute("src") : "";
+    // Dev rejimində (vite) build faylı olmur — yoxlama özünü söndürür
+    if (!mine || !/assets\/index-/.test(mine)) return;
+    const check = async () => {
+      try {
+        const res = await fetch(`/?_v=${Date.now()}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const html = await res.text();
+        const m = html.match(/assets\/index-[A-Za-z0-9_.-]+\.js/);
+        if (m && !mine.includes(m[0])) setUpdateReady(true);
+      } catch {}
+    };
+    check();
+    const id = setInterval(check, 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Yeniləməni TƏHLÜKƏSİZ anda et: heç bir pəncərə açıq olmasın və göndərilməmiş
+  // yazma qalmasın. Əks halda işçi sifariş yazarkən səhifə yenilənə bilərdi.
+  useEffect(() => {
+    if (!updateReady) return;
+    const busy =
+      modalCabin != null ||
+      startCabinId != null ||
+      stockModalOpen ||
+      closeDayOpen ||
+      openDayOpen ||
+      pendingWrites > 0;
+    if (busy) return;
+    const id = setTimeout(() => window.location.reload(), 2000);
+    return () => clearTimeout(id);
+  }, [updateReady, modalCabin, startCabinId, stockModalOpen, closeDayOpen, openDayOpen, pendingWrites]);
   // Offline zamanı lokal vəziyyəti baza kimi işlətmək üçün ref-lər (köhnə closure olmasın)
   const activeRef = useRef(active);
   const warehouseRef = useRef(warehouse);
@@ -1187,6 +1228,15 @@ export default function App() {
         .dot-pulse { animation: pulse-dot 1.6s ease-in-out infinite; }
         input[type=date], input[type=month], input[type=time], input[type=number] { color-scheme: dark; }
       `}</style>
+
+      {updateReady && !showMenu && (
+        <div
+          className="fixed top-0 left-0 right-0 z-50 px-4 py-2 text-center text-sm font-semibold flex items-center justify-center gap-2"
+          style={{ background: T.free, color: "#0B0D14" }}
+        >
+          Yeni versiya hazırdır — iş bitən kimi avtomatik yenilənəcək…
+        </div>
+      )}
 
       {(!online || pendingWrites > 0) && !showMenu && (
         <div

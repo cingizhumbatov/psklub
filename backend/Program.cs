@@ -21,12 +21,38 @@ app.Use(async (ctx, next) =>
         ctx.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
         ctx.Response.Headers["Pragma"] = "no-cache";
     }
+    else
+    {
+        // index.html HEÇ VAXT keşlənməsin. Əks halda işçinin telefonunda köhnə
+        // JavaScript günlərlə qalır və deploy edilən düzəliş ona çatmır.
+        // (Bu, əvvəllər kabinet düzəlişinin telefonlara çatmamasına səbəb olmuşdu.)
+        ctx.Response.OnStarting(() =>
+        {
+            var ct = ctx.Response.ContentType ?? "";
+            if (ct.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                ctx.Response.Headers["Pragma"] = "no-cache";
+            }
+            return Task.CompletedTask;
+        });
+    }
     await next();
 });
 
-// Frontend (build olunmuş statik fayllar wwwroot-dan) verilir
+// Frontend (build olunmuş statik fayllar wwwroot-dan) verilir.
+// assets/ faylları məzmun-heşli adla gəlir (index-<hash>.js) — adı dəyişməyibsə
+// məzmunu da dəyişməyib, ona görə uzunmüddətli keşlənə bilər.
+var staticOptions = new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+    {
+        if (ctx.Context.Request.Path.StartsWithSegments("/assets"))
+            ctx.Context.Response.Headers["Cache-Control"] = "public, max-age=31536000, immutable";
+    }
+};
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(staticOptions);
 
 // ---------- SQLite açar-dəyər anbarı ----------
 // DB_DIR mühit dəyişəni ilə (məs. Docker volume) təyin oluna bilər
@@ -233,7 +259,7 @@ app.MapGet("/api/storage/list", (string? prefix) =>
 });
 
 // SPA fallback — API-yə aid olmayan yollar üçün index.html
-app.MapFallbackToFile("index.html");
+app.MapFallbackToFile("index.html", staticOptions);
 
 app.Run();
 
