@@ -245,21 +245,47 @@ export default function App() {
     } catch {}
   }
 
+  // Başlanğıcda serverdən oxumaq ALINMASA, default ayarlarla davam etmək OLMAZ.
+  // Əks halda müdir uydurma menyu/qiymət/kabinet siyahısı görür və nəyisə
+  // dəyişən kimi real ayarlar (menyu, qiymətlər, kabinet adları, PIN-lər) həmin
+  // default-larla əvəz olunurdu. Ona görə oxuna bilməyəndə ekranda "bağlanılır"
+  // vəziyyəti göstərilir və avtomatik yenidən cəhd edilir.
+  const [bootError, setBootError] = useState(false);
+  const [bootAttempt, setBootAttempt] = useState(0);
   useEffect(() => {
+    let cancelled = false;
+    let retryId = null;
     (async () => {
-      const s = await safeGet("settings");
-      const a = await safeGet("active-sessions");
-      const w = await safeGet("warehouse");
-      const ik = await safeGet("stock-intakes");
-      let bd = await safeGet("current-business-day");
+      const fail = () => {
+        if (cancelled) return;
+        setBootError(true);
+        retryId = setTimeout(() => {
+          if (!cancelled) setBootAttempt((n) => n + 1);
+        }, 4000);
+      };
+      // readRaw: {ok:false} = serverə çatmadıq, {ok:true,data:null} = açar sadəcə yoxdur
+      const keys = ["settings", "active-sessions", "warehouse", "stock-intakes", "current-business-day", "day-open", "day-opened-at"];
+      const got = {};
+      for (const k of keys) {
+        const r = await readRaw(k);
+        if (!r.ok) return fail();
+        got[k] = r.data;
+      }
+      let bd = got["current-business-day"];
       if (!bd) {
         bd = todayStr();
-        await safeSet("current-business-day", bd);
+        if (!(await safeSet("current-business-day", bd))) return fail();
       }
-      const doStored = await safeGet("day-open");
-      const doVal = doStored === null ? true : doStored;
-      const openedAt = await safeGet("day-opened-at");
-      const t = await safeGet(`sales:${bd}`);
+      const rs = await readRaw(`sales:${bd}`);
+      if (!rs.ok) return fail();
+      if (cancelled) return;
+
+      const s = got["settings"];
+      const a = got["active-sessions"];
+      const w = got["warehouse"];
+      const ik = got["stock-intakes"];
+      const doStored = got["day-open"];
+      const openedAt = got["day-opened-at"];
       if (s) setSettings(normalizeSettings(s));
       if (a) {
         const norm = {};
@@ -269,14 +295,19 @@ export default function App() {
         setActive(norm);
       }
       setBusinessDay(bd);
-      setDayOpen(doVal);
+      setDayOpen(doStored === null ? true : doStored);
       if (openedAt != null) setDayOpenedAt(openedAt);
-      if (t) setTodaySales(t);
+      if (rs.data) setTodaySales(rs.data);
       if (w) setWarehouse(w);
       if (ik) setIntakes(ik);
+      setBootError(false);
       setLoading(false);
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+      if (retryId) clearTimeout(retryId);
+    };
+  }, [bootAttempt]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -1252,7 +1283,27 @@ export default function App() {
       {showMenu ? (
         <PublicMenu onBack={menuFromApp ? closeMenu : undefined} />
       ) : loading ? (
-        <div style={{ color: T.muted }} className="text-center py-20">Yüklənir…</div>
+        bootError ? (
+          // Serverə çatmadıq. Uydurma default ayarları GÖSTƏRMİRİK — yanlış
+          // məlumat üzərində edilən dəyişiklik real ayarları məhv edərdi.
+          <div className="text-center py-20 px-4">
+            <div style={{ color: T.danger, fontSize: 15, fontWeight: 600 }} className="mb-2">
+              Serverə qoşulmaq alınmadı
+            </div>
+            <div style={{ color: T.muted, fontSize: 13 }} className="mb-4">
+              İnternet və ya server bağlantısını yoxlayın. Avtomatik yenidən cəhd edilir…
+            </div>
+            <button
+              onClick={() => setBootAttempt((n) => n + 1)}
+              className="px-4 py-2 rounded-xl text-sm font-semibold"
+              style={{ background: T.free, color: "#0B0D14" }}
+            >
+              Yenidən cəhd et
+            </button>
+          </div>
+        ) : (
+          <div style={{ color: T.muted }} className="text-center py-20">Yüklənir…</div>
+        )
       ) : !role ? (
         <LoginView settings={settings} onLogin={login} onMenu={openMenu} />
       ) : (
@@ -2170,6 +2221,7 @@ function Modal({ title, children, onClose }) {
 function CostPricesPanel({ menu, warehouse, onMenuChange }) {
   const [draft, setDraft] = useState({}); // itemId -> yazılan mətn
   const [justSaved, setJustSaved] = useState(false);
+  const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!justSaved) return;
     const id = setTimeout(() => setJustSaved(false), 2500);
@@ -2210,12 +2262,36 @@ function CostPricesPanel({ menu, warehouse, onMenuChange }) {
 
   return (
     <div className="mb-5">
-      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
-        <div style={{ color: T.muted, fontSize: 12 }}>
-          Maya dəyərləri
-          {missing > 0 && <span style={{ color: T.amber }}> · {missing} məhsulda doldurulmayıb</span>}
-        </div>
-        <div className="flex items-center gap-2">
+      {/* Yığılabilən başlıq — məhsul çox olanda Anbar səhifəsi uzanır, panel aşağıda
+          itməsin deyə yuxarıdadır və istəyəndə açılır. */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl"
+        style={{
+          background: T.panel,
+          border: `1px solid ${missing > 0 ? T.amber : T.border}`,
+          color: T.text,
+        }}
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          {open ? <ChevronDown size={15} color={T.muted} /> : <ChevronRight size={15} color={T.muted} />}
+          <span style={{ fontSize: 14, fontWeight: 600 }}>Maya dəyərləri</span>
+          {missing > 0 && (
+            <span style={{ color: T.amber, fontSize: 12 }} className="truncate">
+              · {missing} məhsulda doldurulmayıb
+            </span>
+          )}
+        </span>
+        {stockValue > 0 && (
+          <span style={{ fontFamily: FONT_MONO, fontSize: 13, color: T.muted }} className="shrink-0">
+            {money(stockValue)}
+          </span>
+        )}
+      </button>
+
+      {!open ? null : (
+        <>
+      <div className="flex items-center justify-end mt-2 mb-2 gap-2">
           {justSaved && <span style={{ color: T.free, fontSize: 12 }}>Saxlanıldı</span>}
           <button
             onClick={save}
@@ -2229,7 +2305,6 @@ function CostPricesPanel({ menu, warehouse, onMenuChange }) {
           >
             Yadda saxla
           </button>
-        </div>
       </div>
 
       <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
@@ -2286,6 +2361,8 @@ function CostPricesPanel({ menu, warehouse, onMenuChange }) {
           <span style={{ color: T.muted, fontSize: 12 }}>Anbardakı malın maya dəyəri</span>
           <span style={{ fontFamily: FONT_MONO, fontWeight: 600, fontSize: 14 }}>{money(stockValue)}</span>
         </div>
+      )}
+        </>
       )}
     </div>
   );
@@ -2370,6 +2447,8 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
           </button>
         )}
       </div>
+
+      <CostPricesPanel menu={menu} warehouse={warehouse} onMenuChange={onMenuChange} />
 
       {menu.categories.map((cat) => {
         const items = menu.items.filter((it) => it.categoryId === cat.id);
@@ -2523,8 +2602,6 @@ function WarehouseView({ menu, warehouse, intakes, businessDay, onAdjust, onMenu
           <Plus size={14} /> Yeni bölmə
         </button>
       </div>
-
-      <CostPricesPanel menu={menu} warehouse={warehouse} onMenuChange={onMenuChange} />
 
       <div style={{ color: T.muted, fontSize: 12 }} className="mb-2">Son hərəkətlər</div>
       <div className="rounded-2xl overflow-hidden" style={{ border: `1px solid ${T.border}` }}>
